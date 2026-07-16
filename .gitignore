@@ -1,0 +1,9 @@
+# firmware images and intermediate build artifacts -- never commit these
+*.img
+*.bin
+*.xz
+*.o
+*.so
+build/
+__pycache__/
+*.pyc
