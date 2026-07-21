@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
 """
 build_update_img.py -- take a stock HeadRush Pedalboard 2.7 Update.img and
-produce a modified one with the NAM (Neural Amp Modeler) mod applied:
+produce a modified one with the NAM (Neural Amp Modeler) mod applied via the
+Anxiety OD (v1) pedal's process() hijack (patch_gonkulator.py) -- the user's
+own choice of a pedal they're fine sacrificing board-wide (Gonkulator turned
+out to be dead code, unwired to any UI page; the real Ring Mod pedal has no
+findable static-analysis path; Volume works mechanically but the user needs
+its real function -- see patch_gonkulator.py's docstring and README.md).
+Anxiety OD's own knob (Drive, Tone, or Level) selects/scans .nam model files
+instead of controlling its assigned overdrive parameter.
 
-  1. Additive "Neural Amp Modeler" pedal (own ModFac_construct case, own
-     engine/vtables) -- built and QEMU-validated, but NOT yet reachable from
-     Evil's own pedal-add menu (see README.md "Known limitation").
-  2. Gonkulator ("Ring Mod")-hijack fallback -- the only *reachable* NAM path
-     right now. Its 3 knobs are relabeled NAM / Inp / Outp.
+patch_namloader.py's additive, own-pedal-type design (own ModFac_construct
+case, own engine/vtables) is NOT applied by this build -- it's unreachable
+from Evil's own pedal-add menu (see README.md "Known limitation") and it
+live-patches the ModFac_construct dispatch instruction, a hot path run on
+every pedal construction. Not worth the risk for a pedal nothing can select
+yet. The script is kept in patch/ for future manual use if the menu/DB
+integration ever gets solved.
 
 Never modifies its input. Always writes a new Update.img. See README.md for
 prerequisites (ARM cross toolchain, e2fsprogs, u-boot-tools, the nam_core
-submodule) and for what "reachable" vs "dormant" means here.
+submodule).
 """
 import argparse
 import json
@@ -98,7 +107,14 @@ def build_nam_libs(tc, work):
     cpp_sources = [str(REPO_ROOT / "patch" / "nam_hook.cpp")]
     cpp_sources += [str(p) for p in sorted((nam_core / "NAM").glob("*.cpp"))]
     cpp_sources += [str(p) for p in sorted((nam_core / "NAM" / "wavenet").glob("*.cpp"))]
-    sh([tc.arm_gxx, "-std=c++20", "-O2", "-fPIC", "-shared", "-march=armv7-a", "-mfpu=neon-vfpv4",
+    # -O3/-ffast-math: NAM inference (WaveNet) is CPU-heavy relative to this
+    # embedded ARM core's real-time per-block budget -- real hardware testing
+    # showed audible glitching consistent with missed deadlines (see
+    # nam_hook.cpp's max_process_us/over_budget_count trace). -O2 was overly
+    # conservative for numeric-heavy Eigen/DSP code; -ffast-math is standard
+    # practice for audio DSP (relaxes strict IEEE754 compliance for speed,
+    # no correctness risk for this use case).
+    sh([tc.arm_gxx, "-std=c++20", "-O3", "-ffast-math", "-fPIC", "-shared", "-march=armv7-a", "-mfpu=neon-vfpv4",
         "-mfloat-abi=hard", "-DNAM_ENABLE_A2_FAST", "-DNAM_SAMPLE_FLOAT",
         "-static-libstdc++", "-static-libgcc",
         f"-I{nam_core}", f"-I{nam_core}/NAM", f"-I{nam_core}/Dependencies/eigen",
@@ -119,34 +135,62 @@ def build_nam_libs(tc, work):
 NAM_MOD_BLOCK_RE = None  # set below, needs re module
 
 
-def build_launcher_script(stock_script_text, naml_env, gonk_env):
+def build_launcher_script(stock_script_text, gonk_env=None):
     import re
     global NAM_MOD_BLOCK_RE
     if NAM_MOD_BLOCK_RE is None:
         NAM_MOD_BLOCK_RE = re.compile(r"# --- NAM mod ---.*?# --- end NAM mod ---\n", re.DOTALL)
 
-    block = (
+    if gonk_env is not None:
+        mod_desc = (
+            "# Anxiety OD (v1) process() hijack -- the only NAM path this build applies.\n"
+            "# One of its knobs (Drive/Tone/Level) now selects/scans .nam model files.\n"
+            "# (The additive, own-pedal-type design in patch_namloader.py is NOT\n"
+            "# applied here -- see README.md.)\n"
+        )
+        hook_env_str = f"NAM_HOOK_SLOT_GONK_ADDR={gonk_env['NAM_HOOK_SLOT_GONK_ADDR']} "
+    else:
+        mod_desc = (
+            "# DIAGNOSTIC-ONLY build -- no vtable patched, Evil is byte-for-byte\n"
+            "# stock. Only runs the live-memory census scanner (see nam_hook.cpp/\n"
+            "# nam_preload.cpp) to see what's actually constructed, without risking\n"
+            "# any real pedal the user can't afford to lose.\n"
+        )
+        hook_env_str = ""
+
+    comment = (
         "# --- NAM mod ---\n"
-        "# Additive \"Neural Amp Modeler\" pedal (case 92 in ModFac_construct, own\n"
-        "# engine/vtables). Not yet reachable from Evil's own menu/DB (needs real\n"
-        "# hardware to trace the name-array/type-string reader) -- these hooks are\n"
-        "# wired and QEMU-validated but currently dormant.\n"
-        "export LD_PRELOAD=/usr/Evil/libnam_preload.so\n"
-        f"export NAM_HOOK_SLOT_NAML_ADDR={naml_env['NAM_HOOK_SLOT_NAML_ADDR']}\n"
-        f"export NAM_HOOK_SLOT_NAML_TRIM_IN_ADDR={naml_env['NAM_HOOK_SLOT_NAML_TRIM_IN_ADDR']}\n"
-        f"export NAM_HOOK_SLOT_NAML_TRIM_OUT_ADDR={naml_env['NAM_HOOK_SLOT_NAML_TRIM_OUT_ADDR']}\n"
-        "# Gonkulator (\"Ring Mod\") hijack -- the only *reachable* NAM path until\n"
-        "# the menu/DB integration above is solved. Knobs relabeled NAM/Inp/Outp.\n"
-        f"export NAM_HOOK_SLOT_GONK_ADDR={gonk_env['NAM_HOOK_SLOT_GONK_ADDR']}\n"
+        + mod_desc +
+        "# LD_PRELOAD/NAM_HOOK_SLOT_*_ADDR are scoped to the /usr/Evil/Evil exec\n"
+        "# below via `env`, NOT exported here -- exporting them shell-wide would\n"
+        "# also preload libnam_preload.so into systemd-inhibit (a separate,\n"
+        "# dynamically-linked ELF binary launched right below). Its constructor\n"
+        "# writes to a hardcoded absolute vaddr valid only inside Evil's own\n"
+        "# non-PIE layout; inside systemd-inhibit's unrelated address space that\n"
+        "# write hits unmapped memory and segfaults it before it ever forks Evil\n"
+        "# -- an infinite crash loop, stuck on the splash screen forever.\n"
         "# --- end NAM mod ---\n"
     )
 
     if NAM_MOD_BLOCK_RE.search(stock_script_text):
-        return NAM_MOD_BLOCK_RE.sub(block, stock_script_text)
+        script = NAM_MOD_BLOCK_RE.sub(comment, stock_script_text)
+    else:
+        marker = "while [ 1 ]"
+        idx = stock_script_text.index(marker)
+        script = stock_script_text[:idx] + comment + "\n" + stock_script_text[idx:]
 
-    marker = "while [ 1 ]"
-    idx = stock_script_text.index(marker)
-    return stock_script_text[:idx] + block + "\n" + stock_script_text[idx:]
+    old_exec = "systemd-inhibit --what=handle-power-key /usr/Evil/Evil"
+    new_exec = (
+        "systemd-inhibit --what=handle-power-key "
+        "env LD_PRELOAD=/usr/Evil/libnam_preload.so "
+        f"{hook_env_str}"
+        "/usr/Evil/Evil"
+    )
+    count = script.count(old_exec)
+    if count != 1:
+        die(f"expected exactly 1 occurrence of {old_exec!r} in the launcher script, found {count} "
+            f"-- stock script layout changed, re-verify before patching")
+    return script.replace(old_exec, new_exec)
 
 
 def main():
@@ -176,27 +220,49 @@ def main():
         # text with the file's stdout, which would corrupt the extracted script.
         sh([tc.debugfs, "-R", f"dump /usr/Evil/Scripts/evil {work / 'evil_script_orig.sh'}", str(work / "rootfs.bin")])
 
-        for name in ("trampoline_naml.S", "case92_stub.S", "trampoline_trim.S", "trampoline_gonk.S"):
-            assemble(tc, REPO_ROOT / "patch" / name, work / (Path(name).stem + ".bin"), work)
+        # Anxiety OD ("process()" vtable slot 8) hijack via patch_gonkulator.py:
+        # repoints AnxietyOD's real, live engine vtable (0x1839044, cross-
+        # confirmed via both RTTI xref-chasing and ctor/clone disassembly --
+        # see patch_gonkulator.py's docstring) at an injected trampoline
+        # running NAM inference, falling back to the original process()
+        # (0x3260e0) when no hook is installed. patch_namloader.py
+        # (unreachable additive design, also live-patches the
+        # ModFac_construct dispatch hot path) and patch_modfac_spy.py (needs
+        # a code cave beyond ARM B/BL's +-32MB reach of its target) are NOT
+        # applied here. patch_knob_labels.py (an earlier, naive attempt at
+        # relabeling QML text) is superseded by patch_qml_labels.py below,
+        # which patches the actual compiled QML string table instead of
+        # source text Evil never reads at runtime.
+        tramp_bin = work / "trampoline_gonk.bin"
+        assemble(tc, REPO_ROOT / "patch" / "trampoline_gonk.S", tramp_bin, work)
 
-        evil_naml = work / "Evil.naml"
-        sh([sys.executable, str(REPO_ROOT / "patch" / "patch_namloader.py"),
-            str(work / "Evil"), str(work / "trampoline_naml.bin"), str(work / "case92_stub.bin"),
-            str(work / "trampoline_trim.bin"), str(evil_naml)])
-        naml_env = json.loads((work / (evil_naml.name + ".json")).read_text())
-
-        evil_gonk = work / "Evil.naml_gonk"
+        evil_hijacked = work / "Evil.hijacked"
         sh([sys.executable, str(REPO_ROOT / "patch" / "patch_gonkulator.py"),
-            str(evil_naml), str(work / "trampoline_gonk.bin"), str(evil_gonk)])
-        gonk_env = json.loads((work / (evil_gonk.name + ".json")).read_text())
+            str(work / "Evil"), str(tramp_bin), str(evil_hijacked)])
+        gonk_env = json.loads((work / "Evil.hijacked.json").read_text())
 
-        evil_final = work / "Evil.final"
-        sh([sys.executable, str(REPO_ROOT / "patch" / "patch_knob_labels.py"),
-            str(evil_gonk), str(evil_final)])
+        # patch_qml_labels.py: targets Anxiety OD's own raw QRC-embedded QML
+        # source blob (found via its unique propertyPath string, not
+        # proximity guessing -- see its docstring). Refuses on mismatch.
+        evil_labeled = work / "Evil.labeled"
+        sh([sys.executable, str(REPO_ROOT / "patch" / "patch_qml_labels.py"),
+            str(evil_hijacked), str(evil_labeled)])
+
+        # patch_pedal_title.py DISABLED: v43 real-hardware test showed
+        # renaming this ASCII table entry breaks the pedal entirely (stuck
+        # bypassed, controls read-only, generic fallback labels shown
+        # instead of the custom page at all) -- the string is very likely
+        # used as an internal type-name lookup key (page routing / type
+        # recognition), not just display text. Renaming it in place breaks
+        # that lookup. Do not re-enable without finding what reads this
+        # table as a KEY (not just a label) and confirming the rename is
+        # safe there too.
+        evil_final = work / "Evil.patched"
+        shutil.copyfile(evil_labeled, evil_final)
 
         hook_so, preload_so = build_nam_libs(tc, work)
 
-        launcher = build_launcher_script((work / "evil_script_orig.sh").read_text(), naml_env, gonk_env)
+        launcher = build_launcher_script((work / "evil_script_orig.sh").read_text(), gonk_env=gonk_env)
         (work / "evil_script.sh").write_text(launcher)
 
         rootfs_patched = work / "rootfs.patched.bin"
@@ -246,8 +312,9 @@ def main():
         args.output_img.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(work / "Update_new.img", args.output_img)
         print(f"\nOK  wrote {args.output_img}")
-        print("    Gonkulator (\"Ring Mod\") NAM hijack: REACHABLE today, knobs relabeled NAM/Inp/Outp.")
-        print("    Additive \"Neural Amp Modeler\" pedal: built in, DORMANT (see README.md).")
+        print("    Anxiety OD (v1) process() NAM hijack applied (see patch_gonkulator.py) --")
+        print("    its knob now selects/scans .nam models instead of its overdrive parameter.")
+        print("    Additive \"Neural Amp Modeler\" pedal (patch_namloader.py): NOT applied (see README.md).")
         print("    This has NOT been flashed to any device by this script -- see README.md")
         print("    for the (manual, your responsibility) flashing steps and recovery-mode safety net.")
 

@@ -4,9 +4,12 @@ Reverse-engineered firmware mod for the HeadRush Pedalboard, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
-**Status**: a real, working NAM pedal today (via a hijacked pedal slot), plus
-a fully-built-but-dormant *additive* pedal design for the future. See
-"What's implemented" below before you flash anything.
+**Status**: a real, working NAM pedal today (via a hijacked pedal slot). A
+second, *additive* pedal design also exists in `patch/patch_namloader.py`
+but is **not applied by the build** (see "Known limitation" below) — it's
+unreachable from Evil's own UI and it live-patches a hot dispatch path for
+zero payoff today, so the risk isn't worth it until the reachability problem
+is solved. See "What's implemented" below before you flash anything.
 
 ## What this does
 
@@ -15,26 +18,44 @@ and produces a modified one with:
 
 1. **A reachable NAM pedal today**, by hijacking the "Ring Mod" pedal slot
    (internal codename `Gonkulator`). Its process() function is replaced with
-   NAM inference. Its 3 knobs are relabeled:
-   - **NAM** — selects which `.nam` model file to use (was "Rate")
-   - **Inp** — input trim, ±12dB (was "Mix")
-   - **Outp** — output trim, ±12dB (was "Tone")
+   NAM inference. Its 3 knobs are *supposed* to be relabeled NAM / Inp / Outp
+   (was Rate / Mix / Tone) via `patch/patch_knob_labels.py`, but confirmed on
+   real hardware **this patch has no visible effect** — the on-screen labels
+   still show the original names. The patched bytes are QML *source* text
+   embedded as a Qt resource; Evil almost certainly runs Qt Quick Compiler
+   (`qmlcachegen`) — evidenced by the `.qml_compile_hash`/`.qtmetadata` ELF
+   sections — which precompiles QML to bytecode ahead of time, so the app
+   likely never re-reads this source text at runtime. Cosmetic-only bug,
+   not dangerous, just not yet fixed; finding/patching the actual compiled
+   representation is unsolved.
 
-   Model files: drop `.nam` files into the same USB folder the IR loader
-   already uses (`Impulse Responses`), sorted alphabetically. The NAM knob's
-   full sweep divides into N equal zones, one per file found — turn it to
-   switch models. Folder re-scanned live every time the knob moves, so
-   adding/removing files doesn't need a reboot.
+   Model files: drop `.nam` files into their own **`/NAM`** folder on the
+   USB drive (sibling to `Impulse Responses`, `Blocks`, `Rigs`, etc. — create
+   it yourself via the File Manager/USB transfer view if it doesn't exist
+   yet). Originally this piggybacked the existing `Impulse Responses` folder,
+   but Evil's own IR-folder sync logic purges anything it doesn't recognize
+   as a real IR (i.e. non-`.wav`) every time the USB transfer view reopens —
+   confirmed on real hardware, `.nam` files placed there get silently
+   deleted. `/NAM` is untouched by that sync. Files sorted alphabetically;
+   the NAM knob's full sweep divides into N equal zones, one per file found —
+   turn it to switch models. Folder re-scanned live every time the knob
+   moves, so adding/removing files doesn't need a reboot.
 
    **Trade-off**: whichever board slot you put "Ring Mod" in loses its real
    ring-modulator function — this is a hijack, not an addition.
 
-2. **A genuinely additive "Neural Amp Modeler" pedal type** — its own case in
-   the firmware's effect factory, its own engine object, no existing pedal
-   sacrificed. Fully built and validated (structurally + under QEMU
-   emulation), but **not yet reachable**: nothing in Evil's own UI knows how
-   to construct it from the pedal-add menu or a saved preset yet. See "Known
-   limitation" below.
+2. **A genuinely additive "Neural Amp Modeler" pedal type** (design only,
+   **not applied by this build**) — its own case in the firmware's effect
+   factory, its own engine object, no existing pedal sacrificed. Built and
+   validated structurally + under QEMU emulation, but **not yet reachable**:
+   nothing in Evil's own UI knows how to construct it from the pedal-add
+   menu or a saved preset yet, and never tested on real hardware. It also
+   patches the `ModFac_construct` dispatch instruction that runs on *every*
+   pedal construction (including whatever preset loads at boot) — real
+   surgery to a hot path, for a pedal nothing can select yet. Not worth that
+   risk for zero working functionality, so `build_update_img.py` no longer
+   invokes `patch_namloader.py`. Script kept for future manual use if the
+   reachability problem gets solved via UART. See "Known limitation" below.
 
 ## Prerequisites
 
@@ -100,7 +121,7 @@ itself (only SHA1 integrity hashes, which `mkimage` recomputes correctly for
 the modified data) — but this was never tested against a real device this
 project. Proceed at your own risk.
 
-## Known limitation: the additive pedal is dormant
+## Known limitation: the additive pedal is not applied
 
 The additive "Neural Amp Modeler" pedal type (see #2 above) needs Evil's
 own code to translate a saved preset's `type` string (or a pedal-add menu
@@ -108,9 +129,18 @@ selection) into a call to its internal effect-factory function with the
 right type index. That translation code was never found through static
 analysis alone — it needs a real device with root/UART access and a
 debugger (breakpoint at the factory function, load any preset, read the
-backtrace) to trace. If you get there, `patch/patch_namloader.py`'s module
+backtrace) to trace.
+
+Because it's unreachable, `build_update_img.py` **does not run**
+`patch/patch_namloader.py` — that script also overwrites a live dispatch
+instruction inside `ModFac_construct` (a function called on every pedal
+construction, including whatever preset loads at boot), and that's too much
+risk to a hot path for a pedal nothing can select. If you get UART access
+and trace the menu/DB translation, `patch/patch_namloader.py`'s module
 docstring has the full technical design; the pedal itself (engine, vtables,
-DSP hook, trim knobs) is already built and just needs a menu entry.
+DSP hook, trim knobs) is already built and just needs a menu entry — at
+which point you'd re-wire its call back into `build_update_img.py` and
+re-validate under QEMU before trying it on real hardware.
 
 ## Repo layout
 
@@ -126,10 +156,11 @@ DSP hook, trim knobs) is already built and just needs a menu entry.
   trampolines at process startup.
 - `patch/patch_gonkulator.py` — hijacks the real Gonkulator/"Ring Mod"
   pedal's `process()`.
-- `patch/patch_namloader.py` — builds the additive, non-hijacking pedal
-  type (own `ModFac_construct` case, own engine/vtables). Its module
-  docstring is the full technical writeup of how HeadRush's effect-factory
-  binary format works.
+- `patch/patch_namloader.py` — **not invoked by `build_update_img.py`** (see
+  "Known limitation" above). Builds the additive, non-hijacking pedal type
+  (own `ModFac_construct` case, own engine/vtables). Its module docstring is
+  the full technical writeup of how HeadRush's effect-factory binary format
+  works.
 - `patch/patch_knob_labels.py` — relabels the Ring Mod editor screen's 3
   knobs.
 - `patch/trampoline_*.S`, `patch/case92_stub.S` — hand-written ARM32

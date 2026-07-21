@@ -12,26 +12,30 @@
 //     reference/fallback. ABI: this+0x68=float* input, this+0x6c=float*
 //     output, this+0x70=int32_t num_samples (mono, this-only, no extra args).
 //
-//   nam_process_gonk(...) -- SUPERSEDED (Gonkulator hijack). Replaces the
-//     REAL Gonkulator engine object's process() (its own vtable slot,
-//     file_offset 0x1824914, vaddr 0x182c914, originally 0x2e7910), in
-//     place, on the shared class -- so every Gonkulator instance loses its
-//     real function board-wide. User explicitly rejected this as the final
-//     design (SESSION_NOTES.md "IMPORTANT -- user explicitly rejected this").
-//     Kept only as a proven-working fallback/reference now that the additive
-//     path exists. ABI confirmed via PyGhidra decompile:
+//   nam_process_gonk(...) -- CURRENT hijack design, name kept from its
+//     original (superseded) Gonkulator target for minimal churn. Replaces a
+//     REAL engine object's process() vtable slot in place, on the shared
+//     class -- so every instance of that pedal type loses its real function
+//     board-wide. Tried against Gonkulator (dead code, no UI page --
+//     nam_process_gonk was simply never invoked), then Volume (works
+//     mechanically, but rejected: user needs Volume's real function, tied
+//     to the expression pedal). Now targets ANXIETY OD (v1) -- see
+//     patch_gonkulator.py for the full derivation -- the user's own choice
+//     of a pedal they're fine sacrificing board-wide. ABI:
 //       void process(EngineObj* this, uint32_t param2, float** input,
 //                     uint32_t numChannels, float** output, int32_t numFrames,
 //                     uint32_t* flags, void* ctx)
 //     input/output are arrays of per-channel float* (numChannels is 1 or 2).
 //
-//   nam_process_naml(...) -- CURRENT, additive design. Same 8-arg ABI as
-//     nam_process_gonk (the new engine object is a byte-for-byte clone of
-//     Gonkulator's own layout, see BREAKTHROUGH #6/patch_namloader.py), but
-//     this is a genuinely NEW, independent object graph -- Gonkulator's real
-//     class/vtable is never written to, so real Gonkulator pedals keep
-//     working normally everywhere. Also handles Input/Output trim (see
-//     nam_set_input_trim/nam_set_output_trim below).
+//   nam_process_naml(...) -- additive design, currently UNREACHABLE (no UI
+//     path constructs its new pedal type/menu entry -- see README.md).
+//     Same 8-arg ABI as nam_process_gonk (the new engine object is a
+//     byte-for-byte clone of Gonkulator's own layout, see BREAKTHROUGH
+//     #6/patch_namloader.py), but this is a genuinely NEW, independent
+//     object graph -- whatever real class it's cloned from is never written
+//     to. Also handles Input/Output trim (see nam_set_input_trim/
+//     nam_set_output_trim below), which nam_process_gonk's hijack design
+//     can't offer (no spare vtable slots on an existing, shared class).
 //
 // All three are loaded via dlopen() by nam_preload.cpp's constructor, which
 // writes the corresponding function pointer into each trampoline's hook_slot
@@ -42,37 +46,79 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <string>
-#include <thread>
+#include <type_traits>
+#include <unistd.h>
 #include <vector>
 
 #include "NAM/dsp.h"
 #include "NAM/get_dsp.h"
+#include "NAM/slimmable.h"
 
 namespace
 {
+
+// Raw pthread_create/pthread_detach instead of std::thread everywhere in
+// this file. This library is compiled with -static-libstdc++/-static-libgcc
+// (needed: the real device's libstdc++.so.6 is a GCC ~10 build, GLIBCXX
+// 3.4.28 max, too old for symbols this cross-toolchain's libstdc++
+// generates -- confirmed, dynamic linking fails outright with "GLIBCXX_
+// 3.4.32 not found"), but Evil itself and libnam_preload.so both use the
+// SYSTEM libstdc++.so.6 dynamically. That split -- one self-contained
+// static copy of libstdc++ internals in this .so, a separate dynamic copy
+// shared by the rest of the process -- segfaults (confirmed via a minimal
+// QEMU reproduction) the moment std::thread's constructor runs from inside
+// this library: its internal thread bookkeeping isn't the same instance the
+// rest of the process's pthread/exception machinery expects. Plain
+// pthread_create is a C API with no such internal C++ static state to
+// duplicate, so it sidesteps the conflict entirely.
+template <typename F>
+void spawn_detached(F&& fn)
+{
+  auto* ctx = new std::decay_t<F>(std::forward<F>(fn));
+  auto* trampoline = +[](void* arg) -> void* {
+    auto* f = static_cast<std::decay_t<F>*>(arg);
+    (*f)();
+    delete f;
+    return nullptr;
+  };
+  pthread_t tid;
+  if (pthread_create(&tid, nullptr, trampoline, ctx) != 0)
+  {
+    delete ctx;
+    return;
+  }
+  pthread_detach(tid);
+}
 
 // TODO: confirm Evil's actual engine sample rate (48000 assumed; check
 // /Engine/... property tree or IRLoaderController's Reset() call site).
 constexpr double kSampleRate = 48000.0;
 
-// Folder scanned for *.nam files, mirroring how "Impulse Responses" already
-// works for real IRs. Overridable via NAM_MODEL_DIR for host-side / emulated
-// testing only.
+// Folder scanned for *.nam files. Originally piggybacked "Impulse
+// Responses" (matching how real IRs work), but Evil's own IR-folder sync
+// logic purges anything it doesn't recognize as a real IR (i.e. non-.wav)
+// whenever the USB drive gets reconnected -- confirmed on real hardware,
+// .nam files placed there vanish the next time the USB transfer view
+// reopens. Own dedicated sibling folder instead, untouched by that sync.
+// Overridable via NAM_MODEL_DIR for host-side / emulated testing only.
 std::filesystem::path model_dir()
 {
   if (const char* env = std::getenv("NAM_MODEL_DIR"))
     return std::filesystem::path(env);
-  return "/media/az01-internal/Evil/usb_mnt/Impulse Responses";
+  return "/media/az01-internal/Evil/usb_mnt/NAM";
 }
 
 // Legacy single-fixed-file path, used only by the superseded nam_process()
@@ -81,13 +127,22 @@ const char* model_path()
 {
   if (const char* env = std::getenv("NAM_MODEL_PATH"))
     return env;
-  return "/media/az01-internal/Evil/usb_mnt/Impulse Responses/model.nam";
+  return "/media/az01-internal/Evil/usb_mnt/NAM/model.nam";
 }
 
-// Knob raw-value range assumed for normalizing into a model index. HeadRush
-// knobs commonly display 0-100; NOT yet confirmed against the real device
-// (see SESSION_NOTES.md) -- override via NAM_KNOB_MIN/NAM_KNOB_MAX if the
-// real range turns out to be different (e.g. 0.0-1.0).
+// Knob raw-value range assumed for normalizing into a model index. Current
+// hijack target is AnxietyOD -- Drive/Tone/Level are all plain 0-100%
+// knobs (unlike Gonkulator's hijacked "Rate" knob, which was 200-2000 Hz as
+// a ring-mod carrier frequency -- kept as a cautionary note: getting this
+// range wrong silently clamps every real knob position to the same index,
+// via std::clamp(t, 0.0f, 1.0f) in knob_value_to_index()). Override via
+// NAM_KNOB_MIN/NAM_KNOB_MAX if this still isn't exactly right.
+//
+// CONFIRMED via live-hardware wide-memory diffing: the real range is
+// [0.0, 1.0] (normalized), not [0, 100] -- an earlier assumption made when
+// the (wrong) +0x2ac offset was still believed to be the model-select
+// field. All three real knobs default to 0.5 and were observed ranging
+// 0.0-1.0 when swept to their extremes.
 float knob_min()
 {
   if (const char* env = std::getenv("NAM_KNOB_MIN"))
@@ -99,38 +154,149 @@ float knob_max()
 {
   if (const char* env = std::getenv("NAM_KNOB_MAX"))
     return std::strtof(env, nullptr);
-  return 100.0f;
+  return 1.0f;
 }
 
-// Lists *.nam files directly in model_dir(), sorted alphabetically by
-// filename. No renaming scheme required -- whatever files are present, in
-// whatever names, get indices 0..N-1 in alphabetical order. Re-scanned only
-// when the knob value changes (see nam_process_gonk), never on every audio
-// block, so directory I/O never happens on the real-time path.
-std::vector<std::filesystem::path> scan_models()
+// Moved here (from the Input/Output trim section further down) so
+// nam_process_gonk can use these directly -- see its own comment on why
+// Tone/Level are now read straight from the engine object instead of via a
+// separate injected setter.
+float trim_max_db()
 {
-  std::vector<std::filesystem::path> files;
-  std::error_code ec;
-  std::filesystem::directory_iterator it(model_dir(), ec);
-  if (ec)
-    return files; // folder missing / USB not mounted / etc -- empty list
+  if (const char* env = std::getenv("NAM_TRIM_MAX_DB"))
+    return std::strtof(env, nullptr);
+  return 12.0f;
+}
 
-  for (const auto& entry : std::filesystem::directory_iterator(model_dir(), ec))
-  {
-    if (ec)
-      break;
-    if (!entry.is_regular_file(ec))
-      continue;
-    auto ext = entry.path().extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
-    if (ext == ".nam")
-      files.push_back(entry.path());
-  }
+// raw01 is the knob's own [0,1] range directly (NOT pre-converted to
+// bipolar) -- 0.0=true silence, 0.5=unity/0dB, 1.0=+trim_max_db() boost.
+// Originally symmetric bipolar [-1,+1] mapped 0% to -trim_max_db() (still
+// clearly audible, e.g. -12dB), not silence -- confirmed on real hardware
+// this doesn't match the expected "0% = mute" behavior of a trim/volume
+// control. Below center is a plain linear amplitude fade to true zero
+// (matches how a physical volume knob feels down near its minimum); at or
+// above center it's the original dB-boost curve.
+float trim_gain(float raw01)
+{
+  if (raw01 <= 0.0f)
+    return 0.0f;
+  if (raw01 < 0.5f)
+    return raw01 / 0.5f;
+  const float bipolar_above_center = (raw01 - 0.5f) * 2.0f; // 0..1
+  const float db = bipolar_above_center * trim_max_db();
+  return std::pow(10.0f, db / 20.0f);
+}
 
-  std::sort(files.begin(), files.end(), [](const std::filesystem::path& a, const std::filesystem::path& b) {
-    return a.filename().string() < b.filename().string();
+// Every *.nam file under model_dir() is read and JSON-parsed exactly ONCE,
+// the first time Anxiety OD is actually engaged (see ensure_models_preloaded,
+// called from switch_model_in_background), and kept in memory for the rest
+// of the boot -- model switching after that never touches the filesystem at
+// all, it just re-constructs a nam::DSP from the already-in-memory JSON.
+//
+// Deliberately triggered LAZILY, not eagerly at Evil startup. An earlier
+// version called this unconditionally from nam_preload.cpp's constructor
+// (i.e. every single boot, whether or not Anxiety OD is ever added).
+// Confirmed on real hardware this made the USB-transfer hang WORSE -- it
+// started happening even on boots that never touched Anxiety OD at all,
+// exactly matching the one thing that changed (this scan going from
+// conditional-on-pedal-use to unconditional-every-boot). Whatever the exact
+// mechanism, simply enumerating model_dir() via std::filesystem appears to
+// conflict with the USB mass-storage subsystem -- note get_dsp() itself
+// never held a file open during processing even before this change (a
+// short-lived std::ifstream, always fully closed before returning -- see
+// NAM/get_dsp.cpp), so "files kept open during processing" was never
+// actually the mechanism. Keeping the scan conditional on real pedal use
+// (as it always was pre-refactor) still gets the "never re-scan on every
+// switch" benefit without touching the filesystem on boots that don't need
+// it.
+struct CachedModel
+{
+  std::string display_name; // filename only, for sorting
+  nlohmann::json config;
+};
+
+// Calibration result cache, indexed the same way as g_cached_models (one
+// entry per cached model, sized once preload finishes). Kept separate from
+// CachedModel itself since std::atomic isn't movable and g_cached_models is
+// move-assigned as a whole when preload finishes. -1.0 = "not yet
+// calibrated for this model". Real hardware showed glitches/occasional
+// full-device reboots when repeatedly switching models -- every switch was
+// redoing the full quality-tier benchmark from scratch (which itself
+// reconstructs the internal WaveNet sub-model 2x per channel, once per tier
+// tested), real, avoidable CPU/memory churn on every single switch. Caching
+// per-model means only the FIRST time a given model is selected pays that
+// cost; switching back to an already-seen model is instant. A plain mutex
+// is fine here (calibration is rare -- once per distinct model ever
+// selected -- never on the real-time audio path).
+std::vector<double> g_calibration_cache;
+std::mutex g_calibration_cache_mutex;
+
+std::vector<CachedModel> g_cached_models;
+std::atomic<bool> g_models_ready{false};
+std::atomic<bool> g_preload_started{false};
+
+void preload_models_in_background()
+{
+  bool expected = false;
+  if (!g_preload_started.compare_exchange_strong(expected, true))
+    return; // already started (or done) -- only ever run once per boot
+
+  spawn_detached([]() {
+    std::vector<CachedModel> found;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(model_dir(), ec))
+    {
+      if (ec)
+        break;
+      if (!entry.is_regular_file(ec))
+        continue;
+      // Skip macOS AppleDouble sidecar files ("._realname.nam") -- Finder
+      // creates these alongside real files when copying to a FAT/exFAT USB
+      // drive (metadata/resource fork it can't store natively). They carry
+      // the same .nam extension but binary, non-JSON content that throws
+      // when parsed. They also sort first alphabetically ('.' < any
+      // letter), so left unfiltered one would silently become index 0.
+      const std::string filename = entry.path().filename().string();
+      if (filename.rfind("._", 0) == 0)
+        continue;
+      auto ext = entry.path().extension().string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (ext != ".nam")
+        continue;
+      try
+      {
+        std::ifstream in(entry.path());
+        nlohmann::json j;
+        in >> j;
+        // Fully test-construct the model here, not just parse its JSON --
+        // a file can have perfectly valid JSON syntax but a corrupt/
+        // malformed weight architecture that only throws once nam::get_dsp
+        // actually tries to build the DSP graph from it. Confirmed on real
+        // hardware: one such file caused occasional full-device reboots
+        // when a switch happened to land on it, even though preload's
+        // JSON-parse-only check let it through. Discarded immediately --
+        // this is purely a validity check, the real DSP gets built fresh
+        // per channel at actual switch time (see switch_model_in_background).
+        // A file that fails this never enters g_cached_models at all, so
+        // with N *.nam files and one corrupt, the pedal behaves as if there
+        // are only N-1 -- exactly like the corrupt file was never there.
+        { auto discard = nam::get_dsp(j); }
+        found.push_back(CachedModel{filename, std::move(j)});
+      }
+      catch (...)
+      {
+        // Bad/corrupt file -- skip it, don't let one bad file block every
+        // other model from loading.
+      }
+    }
+
+    std::sort(found.begin(), found.end(),
+              [](const CachedModel& a, const CachedModel& b) { return a.display_name < b.display_name; });
+
+    g_calibration_cache.assign(found.size(), -1.0);
+    g_cached_models = std::move(found);
+    g_models_ready.store(true, std::memory_order_release);
   });
-  return files;
 }
 
 // Maps a raw knob value to a model index: divides the knob's full sweep into
@@ -162,13 +328,79 @@ struct ModelState
   std::atomic<bool> loading{false};
   std::atomic<bool> ready{false};
 
-  // Dynamic (Gonkulator) model-selection state.
   std::atomic<bool> switching{false};
   std::atomic<int> active_index{-1};
   // NaN sentinel guarantees the very first process() call always triggers an
-  // initial scan+load, regardless of whatever raw value the knob starts at.
+  // initial load attempt, regardless of whatever raw value the knob starts
+  // at.
   std::atomic<float> last_seen_knob_raw{std::numeric_limits<float>::quiet_NaN()};
+  // Debounce for switch_model_in_background -- see its own comment.
+  std::atomic<int64_t> last_switch_attempt_ms{0};
+
+  // Duck-and-switch model transition (see nam_process_gonk's own comment).
+  // The background load thread builds the new model into pending_dsp/
+  // pending_index and only sets pending_ready -- it never touches dsp[]
+  // directly. Only the AUDIO THREAD ever writes dsp[]/active_index/
+  // fade_progress, which also fixes a latent thread-safety bug: previously
+  // the background thread swapped s.dsp[ch] directly while the audio thread
+  // could be mid-call on the very same object.
+  std::unique_ptr<nam::DSP> pending_dsp[kMaxChannels];
+  int pending_index = -1; // set before pending_ready; read only after
+  std::atomic<bool> pending_ready{false};
+  // 0=steady, 1=fading out the old model, 2=fading in the new one. Atomic
+  // because switch_model_in_background (background thread) reads it to
+  // avoid starting a new switch while a transition is still in flight;
+  // fade_progress itself is audio-thread-only, no atomic needed.
+  std::atomic<int> fade_state{0};
+  int32_t fade_progress = 0;
+
+  // Which engine object (this_) this slot belongs to -- see state_for().
+  std::atomic<void*> owner_this{nullptr};
 };
+
+// Anxiety OD's process() is hijacked on the SHARED CLASS VTABLE -- every
+// instance of the pedal anywhere on the board calls into the same
+// nam_process_gonk. A single global ModelState (the original design, when
+// only one instance was ever tested) meant a second Anxiety OD instance
+// would share the SAME loaded nam::DSP objects -- feeding two logically
+// independent audio streams into one WaveNet's internal hidden state/history
+// buffers as if they were one continuous stream. Confirmed on real hardware:
+// adding a second instance produced "crazy noise", exactly the symptom of
+// corrupted streaming-model state. Fixed by keying state per engine-object
+// pointer instead of a single singleton.
+//
+// Lock-free fixed-size table (not a mutex-protected map): claimed by the
+// first process() call from a never-before-seen this_, kept PERMANENTLY for
+// the rest of the boot -- slots are never released, even after the owning
+// pedal is deleted. This means the real consumption isn't "how many Anxiety
+// OD instances exist at once" but "how many DISTINCT instances have EVER
+// existed this boot", which climbs every time a pedal is added+deleted+
+// re-added (e.g. during exploratory testing/undo-redo), not just from
+// genuinely concurrent instances. Confirmed on real hardware: a single test
+// session produced 11 distinct this_ pointers -- kMaxInstances=4 (sized for
+// "a few pedals on a board at once") silently collapsed instances 5+ onto
+// one shared fallback slot, reintroducing the exact cross-instance audio
+// corruption the per-instance design was built to prevent. Sized generously
+// now for a long exploratory session, not just a static board -- each
+// unclaimed slot costs a few bytes of atomics, negligible.
+constexpr int kMaxInstances = 64;
+ModelState g_instances[kMaxInstances];
+
+ModelState& state_for(void* this_)
+{
+  for (auto& inst : g_instances)
+  {
+    if (inst.owner_this.load(std::memory_order_acquire) == this_)
+      return inst;
+  }
+  for (auto& inst : g_instances)
+  {
+    void* expected = nullptr;
+    if (inst.owner_this.compare_exchange_strong(expected, this_, std::memory_order_acq_rel))
+      return inst;
+  }
+  return g_instances[kMaxInstances - 1]; // all slots claimed -- degrade, don't crash
+}
 
 // Superseded nam_process()/nam_process_gonk() hooks' state.
 ModelState& state()
@@ -195,7 +427,7 @@ void load_fixed_path_in_background()
   if (!s.loading.compare_exchange_strong(expected, true))
     return; // already loading (or loaded) -- don't spawn twice
 
-  std::thread([&s]() {
+  spawn_detached([&s]() {
     try
     {
       const auto path = std::filesystem::path(model_path());
@@ -216,30 +448,143 @@ void load_fixed_path_in_background()
       // Leave ready=false: process() keeps passing audio through dry.
       // (No model file yet, bad JSON, unsupported architecture, etc.)
     }
-  }).detach();
+  });
 }
 
-// Kicks off (at most one concurrent) background switch: re-scan model_dir(),
-// recompute the target index from `raw`, and if it differs from the
-// currently active model, load it and atomically swap it in. Never touches
-// the filesystem or blocks on the audio thread -- this only ever runs on a
-// detached worker thread.
+// Minimum time between switch attempts, regardless of how often process()
+// sees a changed raw value. Defensive: if a knob-value field ever turns out
+// to be some other, continuously-changing internal parameter (not a stable
+// UI knob), every process() call would otherwise see raw != prev and fire a
+// fresh switch attempt on every single audio block. A human turning a
+// physical knob does not need more than a few switch attempts per second;
+// anything faster than this is either noise or a wrong-offset assumption,
+// not real input.
+constexpr int64_t kMinSwitchIntervalMs = 250;
+
+int64_t now_ms()
+{
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// A2 models expose a discrete set of quality tiers (SlimmableModel::
+// SetSlimmableSize, 0.0=minimum/"Lite" .. 1.0=maximum/"Full" -- see
+// https://www.tone3000.com/guides/nam-a2-the-complete-guide). Forcing 0.0
+// always (the first working fix for the real-hardware glitching) is
+// needlessly conservative for models with headroom to spare. This benchmarks
+// every tier this specific model actually offers (GetSlimmableSizeBreakpoints
+// tells us how many exist -- not all models have the same count) by running
+// real inference on silent synthetic blocks at the real hardware's observed
+// block size, from highest quality down, and keeps the highest tier whose
+// measured time stays safely under the real-time budget. Runs entirely on
+// the background load thread (SetSlimmableSize is documented "thread-safe,
+// not real-time-safe"), never the audio thread, so this adds zero real-time
+// risk -- worst case it takes a bit longer to finish loading.
+constexpr int kCalibrationBlockSize = 48; // matches observed real hardware numFrames
+constexpr int kCalibrationIters = 8;
+// Require measured time under 50% of budget, not 100% (originally 70%,
+// tightened after real-hardware testing -- see below). Real playing
+// conditions have more jitter/contention than a clean synthetic benchmark,
+// and the whole point of this feature is avoiding glitches, not chasing the
+// exact edge of what's possible.
+constexpr double kCalibrationSafetyMargin = 0.5;
+
+// Every Anxiety OD instance anywhere on the board shares the SAME per-block
+// real-time deadline (they're all processed within the same audio callback)
+// -- but each instance's calibration used to assume it was the ONLY user of
+// that budget. Confirmed on real hardware: instance A calibrated fine alone
+// (691us against a 1000us budget, passed its own 70%-margin check), but once
+// instance B was also active, A's real measured cost was 1503us -- both
+// instances' individually-"safe" costs simply added up past the shared
+// deadline. Dividing the budget by how many instances are currently claimed
+// (see state_for()) doesn't retroactively fix an already-loaded instance's
+// choice, but ensures every NEW calibration accounts for the others that
+// already exist.
+int count_claimed_instances()
+{
+  int n = 0;
+  for (auto& inst : g_instances)
+    if (inst.owner_this.load(std::memory_order_acquire) != nullptr)
+      ++n;
+  return n;
+}
+
+double calibrate_slimmable_quality(nam::DSP& dsp, nam::SlimmableModel& slimmable)
+{
+  const int concurrent_instances = std::max(1, count_claimed_instances());
+  const double budget_us = static_cast<double>(kCalibrationBlockSize) / kSampleRate * 1e6 / concurrent_instances;
+  const auto breakpoints = slimmable.GetSlimmableSizeBreakpoints();
+  const size_t num_tiers = breakpoints.size() + 1;
+
+  // A silent buffer risks underestimating real cost if the model (or Eigen's
+  // own codepaths) has any signal-dependent fast path for near-zero input --
+  // a low-amplitude sine is closer to a real, continuously-varying guitar
+  // signal and won't trigger such a shortcut.
+  std::vector<float> test_signal(static_cast<size_t>(kCalibrationBlockSize));
+  for (int i = 0; i < kCalibrationBlockSize; ++i)
+    test_signal[static_cast<size_t>(i)] =
+      0.3f * static_cast<float>(std::sin(2.0 * 3.14159265358979323846 * 220.0 * i / kSampleRate));
+  std::vector<float> scratch(static_cast<size_t>(kCalibrationBlockSize), 0.0f);
+  float* in_arr[1] = {test_signal.data()};
+  float* out_arr[1] = {scratch.data()};
+
+  for (size_t tier = num_tiers; tier-- > 0;) // highest quality first
+  {
+    const double ratio = (static_cast<double>(tier) + 0.5) / static_cast<double>(num_tiers);
+    slimmable.SetSlimmableSize(ratio);
+    dsp.Reset(kSampleRate, kCalibrationBlockSize); // re-warm at this tier before timing
+
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int iter = 0; iter < kCalibrationIters; ++iter)
+      dsp.process(in_arr, out_arr, kCalibrationBlockSize);
+    const auto t1 = std::chrono::steady_clock::now();
+    const double avg_us = static_cast<double>(
+                             std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count())
+                           / static_cast<double>(kCalibrationIters);
+
+    if (avg_us < budget_us * kCalibrationSafetyMargin)
+      return ratio;
+  }
+  return 0.0; // nothing fit safely -- fall back to minimum/Lite
+}
+
+// Kicks off (at most one concurrent, rate-limited) background switch:
+// re-constructs a nam::DSP from the already-in-memory cached JSON (see
+// g_cached_models) and atomically swaps it in. Touches no filesystem at
+// all -- only runs on a detached worker thread regardless.
 void switch_model_in_background(ModelState& s, float raw)
 {
+  const int64_t now = now_ms();
+  const int64_t last = s.last_switch_attempt_ms.load(std::memory_order_relaxed);
+  if (now - last < kMinSwitchIntervalMs)
+    return; // debounced -- too soon since the last attempt
+  s.last_switch_attempt_ms.store(now, std::memory_order_relaxed);
+
+  if (!g_models_ready.load(std::memory_order_acquire))
+  {
+    preload_models_in_background(); // no-op if already started -- see its own comment
+    return; // not finished yet -- next raw-change (or retry, see
+            // nam_process_gonk) will try again
+  }
+
+  // Don't start a new background load while a previous one's result is
+  // still being duck-and-switched in by the audio thread, or is sitting
+  // unpicked-up in the pending slot -- see ModelState's own comment on why
+  // dsp[]/pending_dsp[] are each owned by exactly one thread.
+  if (s.fade_state.load(std::memory_order_relaxed) != 0 || s.pending_ready.load(std::memory_order_acquire))
+    return;
+
   bool expected = false;
   if (!s.switching.compare_exchange_strong(expected, true))
     return; // a switch is already in flight; the next process() call that
             // still sees a changed value will retry once this one finishes
 
-  std::thread([&s, raw]() {
+  spawn_detached([&s, raw]() {
     // Everything in this thread body runs inside this try/catch, on purpose:
-    // an exception escaping a detached std::thread's entry function calls
+    // an exception escaping a detached thread's entry function calls
     // std::terminate() *without* unwinding (the Reset guard below would never
     // run), which not only kills the whole process but was observed to hang
-    // rather than cleanly abort under QEMU-user ARM emulation. scan_models()
-    // and std::filesystem calls can throw (permission errors, races on an
-    // unplugging USB drive, etc.), so nothing here is allowed to be outside
-    // a catch-all.
+    // rather than cleanly abort under QEMU-user ARM emulation.
     try
     {
       struct Reset
@@ -248,30 +593,95 @@ void switch_model_in_background(ModelState& s, float raw)
         ~Reset() { flag.store(false, std::memory_order_release); }
       } reset{s.switching};
 
-      auto files = scan_models();
-      const int idx = knob_value_to_index(raw, static_cast<int>(files.size()));
+      const int idx = knob_value_to_index(raw, static_cast<int>(g_cached_models.size()));
       if (idx < 0 || idx == s.active_index.load(std::memory_order_acquire))
         return; // no files found, or knob moved but landed back on the same zone
+      const nlohmann::json& config = g_cached_models[static_cast<size_t>(idx)].config;
 
       std::unique_ptr<nam::DSP> loaded[kMaxChannels];
-      for (auto& d : loaded)
-      {
-        d = nam::get_dsp(files[static_cast<size_t>(idx)]);
-        d->Reset(kSampleRate, 128);
-      }
+      double chosen_ratio = 1.0;
       for (int i = 0; i < kMaxChannels; ++i)
-        s.dsp[i] = std::move(loaded[i]);
-      s.active_index.store(idx, std::memory_order_release);
-      s.ready.store(true, std::memory_order_release);
+      {
+        auto& d = loaded[i];
+        d = nam::get_dsp(config);
+        d->Reset(kSampleRate, 128); // establish sample rate/buffer size FIRST --
+                                     // see the explicit manual prewarm below for
+                                     // why this must happen before, not after,
+                                     // any calibration/warm-up processing.
+        // A2 models can run "Full" (desktop CPU) or "Lite" (pedalboard-class
+        // hardware) at a large cost difference for the same capture -- see
+        // https://www.tone3000.com/guides/nam-a2-the-complete-guide -- via
+        // this runtime SlimmableModel interface (0.0=minimum/Lite,
+        // 1.0=maximum/Full, and SlimmableWavenet defaults to 1.0/Full unless
+        // told otherwise). Real-hardware profiling confirmed Full mode
+        // running ~50% over this device's real-time per-block budget even
+        // with -O3/-ffast-math -- a genuine compute ceiling this device's
+        // ARM core can't close, not a bug. Non-slimmable models (plain
+        // WaveNet/LSTM/etc, dynamic_cast fails) are unaffected -- this is a
+        // no-op for them.
+        if (auto* slimmable = dynamic_cast<nam::SlimmableModel*>(d.get()))
+        {
+          // Calibrate once (channel 0's instance -- same model/config, so
+          // the same tier is safe for every channel) instead of forcing the
+          // lowest tier always; apply the result to every channel afterward.
+          // Cached per-model (see g_calibration_cache's own comment) --
+          // real hardware showed glitches/occasional full-device reboots
+          // when repeatedly switching, and redoing this full benchmark (2x
+          // internal sub-model reconstruction per tier tested) on every
+          // single switch was pure avoidable churn once a model has already
+          // been calibrated once.
+          if (i == 0)
+          {
+            std::lock_guard<std::mutex> lock(g_calibration_cache_mutex);
+            double& cached = g_calibration_cache[static_cast<size_t>(idx)];
+            if (cached < 0.0)
+              cached = calibrate_slimmable_quality(*d, *slimmable);
+            else
+              slimmable->SetSlimmableSize(cached);
+            chosen_ratio = cached;
+          }
+          else
+            slimmable->SetSlimmableSize(chosen_ratio);
+        }
+
+        // Explicit manual prewarm: process silence through the model to let
+        // its internal WaveNet history/hidden state settle BEFORE any real
+        // (or duck-and-switch fade-in) audio ever reaches it. DSP::Reset()
+        // normally does this automatically via prewarm(), but
+        // SlimmableWavenet explicitly overrides GetPrewarmSamples() to
+        // return 0 (no automatic prewarm at all) -- confirmed in
+        // NAM/wavenet/slimmable.h. Without this, the model's FIRST real
+        // samples (right at the start of the fade-in) come from a "cold"
+        // model with empty history, audible as a click/glitch on real
+        // hardware. ~340ms of silence at 48kHz is comfortably more than any
+        // realistic guitar-amp WaveNet's receptive field.
+        {
+          constexpr int32_t kPrewarmSamples = 16384;
+          constexpr int32_t kPrewarmBlockSize = 128;
+          std::vector<float> silence(kPrewarmBlockSize, 0.0f);
+          std::vector<float> scratch(kPrewarmBlockSize, 0.0f);
+          float* in_arr[1] = {silence.data()};
+          float* out_arr[1] = {scratch.data()};
+          for (int32_t done = 0; done < kPrewarmSamples; done += kPrewarmBlockSize)
+            d->process(in_arr, out_arr, kPrewarmBlockSize);
+        }
+      }
+      // Stage into pending_dsp, NOT dsp[] directly -- the audio thread
+      // (nam_process_gonk) is the only thing that ever installs into dsp[],
+      // once it's ready to duck-and-switch. See ModelState's own comment.
+      for (int i = 0; i < kMaxChannels; ++i)
+        s.pending_dsp[i] = std::move(loaded[i]);
+      s.pending_index = idx;
+      s.pending_ready.store(true, std::memory_order_release);
     }
     catch (...)
     {
-      // Bad/corrupt file at this index, unsupported architecture, folder
-      // missing/unmounted, etc. -- keep whatever model was previously
-      // active (or stay in passthrough if none has loaded yet). s.switching
-      // is still reset by the Reset guard during this catch's unwind.
+      // Bad/corrupt cached config, unsupported architecture, etc. -- keep
+      // whatever model was previously active (or stay in passthrough if
+      // none has loaded yet). s.switching is still reset by the Reset guard
+      // during this catch's unwind.
     }
-  }).detach();
+  });
 }
 
 } // namespace
@@ -301,41 +711,54 @@ extern "C" void nam_process(void* this_)
   s.dsp[0]->process(in_arr, out_arr, n);
 }
 
-// Current design: replaces Gonkulator engine's process(). See file header for
+// Current design: replaces AnxietyOD engine's process(). See file header for
 // the confirmed ABI. flags/ctx are intentionally left untouched -- the
 // original's tail-flush/latency bookkeeping on *flags is not replicated in
-// this v1 (Gonkulator is a modulation effect, not a reverb/delay with a real
-// tail, so this is expected to be a safe simplification, but is an explicit
-// known limitation, not a verified-safe one).
+// this v1 (an overdrive is not a reverb/delay with a real tail, so this is
+// expected to be a safe simplification, but is an explicit known
+// limitation, not a verified-safe one).
 //
-// Model selection: this_+0x2ac holds the raw float value of whichever knob
-// the DSPModule-level setter thunk (0x28ce00, devirtualizing to this engine
-// vtable's slot 15 / 0x1a3d04) last wrote there (see SESSION_NOTES.md) --
-// confirmed by static decompile of that setter, NOT re-derived here via a
-// second hook. Reading it directly means no second trampoline/vtable-patch is
-// needed just for knob tracking.
-extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input,
-                                  uint32_t numChannels, float** output, int32_t numFrames,
-                                  uint32_t* /*flags*/, void* /*ctx*/)
+// Model selection: Drive's raw float value (this_+0x534) is read directly
+// off the engine object -- confirmed via live-hardware wide-memory diffing
+// (see patch_gonkulator.py's docstring and git history for the full
+// derivation). No second trampoline/vtable-patch is needed just for knob
+// tracking. Tone (0x548) and Level (0x520) feed input/output trim; bypass
+// is this_+0x26b. See nam_process_gonk below for how each is used.
+
+// Length of each half (fade-out, fade-in) of a model-switch transition.
+// ~100ms at 48kHz. Originally 20ms (960 samples); real-hardware testing
+// still showed a click at that length, requested to be made longer. Also
+// combined with a fix for a separate, likely bigger contributor: the new
+// model wasn't actually warmed up before the fade-in reached it (see the
+// manual prewarm block in switch_model_in_background) -- a cold WaveNet
+// model's first samples are a real source of audible artifacts independent
+// of fade length. True crossfading (running old and new models
+// simultaneously and blending outputs) was considered and rejected: this
+// device's ARM core is already tightly budgeted for a single model (see
+// calibrate_slimmable_quality's own comment), and running two at once
+// risks a worse dropout than the glitch this is meant to fix. Duck-and-
+// switch never runs two models at once, at the cost of a brief dip instead
+// of a true blend.
+constexpr int32_t kFadeLenSamples = 4800;
+
+extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
+                                  float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
 {
   if (numFrames <= 0 || !input || !output || numChannels == 0)
     return;
   if (numChannels > kMaxChannels)
     numChannels = kMaxChannels;
 
-  auto& s = state();
+  auto& s = state_for(this_); // per-engine-instance state -- see its own comment
 
-  if (this_)
-  {
-    const float raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x2ac);
-    const float prev = s.last_seen_knob_raw.exchange(raw, std::memory_order_acq_rel);
-    // NaN-safe inequality: prev != prev is true only for the initial NaN
-    // sentinel, guaranteeing the first call always attempts a load.
-    if (raw != prev || prev != prev)
-      switch_model_in_background(s, raw);
-  }
+  const float drive_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x534); // model select
+  const float tone_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x548);   // input trim
+  const float level_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x520);  // output trim
+  const uint8_t bypass_byte = *(reinterpret_cast<uint8_t*>(this_) + 0x26b);
 
-  if (!s.ready.load(std::memory_order_acquire))
+  // Bypass takes precedence over everything else, including "not ready yet"
+  // -- dry passthrough unconditionally.
+  if (bypass_byte != 0)
   {
     for (uint32_t ch = 0; ch < numChannels; ++ch)
       if (input[ch] && output[ch])
@@ -343,14 +766,154 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     return;
   }
 
-  for (uint32_t ch = 0; ch < numChannels; ++ch)
+  const float prev = s.last_seen_knob_raw.exchange(drive_raw, std::memory_order_acq_rel);
+  bool ready = s.ready.load(std::memory_order_acquire);
+  // NaN-safe inequality: prev != prev is true only for the initial NaN
+  // sentinel, guaranteeing the first call always attempts a load. Also
+  // retries whenever not yet ready (debounced inside
+  // switch_model_in_background) -- covers both the lazy model preload (see
+  // preload_models_in_background) not having started/finished yet, and a
+  // model switch still in flight.
+  if (drive_raw != prev || prev != prev || !ready)
+    switch_model_in_background(s, drive_raw);
+
+  // Pick up a finished background load, if any. Only the audio thread ever
+  // installs into dsp[] -- see ModelState's own comment.
+  if (s.fade_state.load(std::memory_order_relaxed) == 0 && s.pending_ready.load(std::memory_order_acquire))
   {
-    if (!input[ch] || !output[ch])
-      continue;
-    float* in_arr[1] = {input[ch]};
-    float* out_arr[1] = {output[ch]};
-    s.dsp[ch]->process(in_arr, out_arr, numFrames);
+    // The knob can move on while a load (esp. a first-time-this-boot
+    // calibration, which is much slower than a cached one) is still in
+    // flight -- discovered on real hardware as a fast knob sweep producing
+    // several audible duck-and-switch cycles in a row, each landing on a
+    // model the knob had already moved past by the time it was ready. Only
+    // ever install the load that still matches where the knob actually is
+    // right now; a stale one is silently dropped (no fade played for it)
+    // and immediately replaced by a fresh request for the current target.
+    const int current_idx = knob_value_to_index(drive_raw, static_cast<int>(g_cached_models.size()));
+    if (ready && current_idx >= 0 && current_idx != s.pending_index)
+    {
+      for (int i = 0; i < kMaxChannels; ++i)
+        s.pending_dsp[i].reset();
+      s.pending_ready.store(false, std::memory_order_release);
+      switch_model_in_background(s, drive_raw);
+    }
+    else if (!ready)
+    {
+      // First-ever load for this instance -- nothing currently playing to
+      // duck, so install directly and skip the fade entirely.
+      for (int i = 0; i < kMaxChannels; ++i)
+        s.dsp[i] = std::move(s.pending_dsp[i]);
+      s.active_index.store(s.pending_index, std::memory_order_release);
+      s.pending_ready.store(false, std::memory_order_release);
+      s.ready.store(true, std::memory_order_release);
+      ready = true;
+    }
+    else
+    {
+      s.fade_state.store(1, std::memory_order_relaxed); // start fading OUT the current model
+      s.fade_progress = 0;
+    }
   }
+
+  if (!ready)
+  {
+    for (uint32_t ch = 0; ch < numChannels; ++ch)
+      if (input[ch] && output[ch])
+        std::memcpy(output[ch], input[ch], static_cast<size_t>(numFrames) * sizeof(float));
+    return;
+  }
+
+  // Tone/Level are [0,1] with 0.5=center/unity, 0.0=silence -- trim_gain()
+  // takes that range directly.
+  const float in_gain = trim_gain(tone_raw);
+  const float out_gain = trim_gain(level_raw);
+
+  // Clamp the model's input feed to [-1,1] -- trim_gain() can boost input up
+  // to +trim_max_db() (~4x at full boost), and a NAM model fed signal well
+  // outside the level range it was captured/trained at responds with harsh,
+  // sustained-sounding artifacts of its own (not a graceful overdrive), not
+  // just a scaled-up version of its normal output. Different models have
+  // different natural input sensitivity, so a boost that was fine for the
+  // previous model can push a newly-switched-to model out of its trained
+  // range -- reported on real hardware as distortion that persists after a
+  // model switch, not just a transient at the switch itself.
+  for (uint32_t ch = 0; ch < numChannels; ++ch)
+    if (input[ch] && output[ch])
+      for (int32_t i = 0; i < numFrames; ++i)
+        output[ch][i] = std::clamp(input[ch][i] * in_gain, -1.0f, 1.0f);
+
+  const int fade_state = s.fade_state.load(std::memory_order_relaxed);
+  if (fade_state == 0)
+  {
+    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    {
+      if (!input[ch] || !output[ch])
+        continue;
+      float* in_arr[1] = {output[ch]};
+      float* out_arr[1] = {output[ch]};
+      s.dsp[ch]->process(in_arr, out_arr, numFrames);
+    }
+  }
+  else if (fade_state == 1) // fading OUT the current (about-to-be-replaced) model
+  {
+    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    {
+      if (!input[ch] || !output[ch])
+        continue;
+      float* in_arr[1] = {output[ch]};
+      float* out_arr[1] = {output[ch]};
+      s.dsp[ch]->process(in_arr, out_arr, numFrames);
+      for (int32_t i = 0; i < numFrames; ++i)
+      {
+        const float g = 1.0f - std::min(1.0f, static_cast<float>(s.fade_progress + i) / kFadeLenSamples);
+        output[ch][i] *= g;
+      }
+    }
+    s.fade_progress += numFrames;
+    if (s.fade_progress >= kFadeLenSamples)
+    {
+      // Faded to silence -- safe to swap the model now, no audible click.
+      for (int i = 0; i < kMaxChannels; ++i)
+        s.dsp[i] = std::move(s.pending_dsp[i]);
+      s.active_index.store(s.pending_index, std::memory_order_release);
+      s.pending_ready.store(false, std::memory_order_release);
+      s.fade_progress = 0;
+      s.fade_state.store(2, std::memory_order_relaxed); // start fading IN the new model
+    }
+  }
+  else // fade_state == 2: fading IN the newly-installed model
+  {
+    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    {
+      if (!input[ch] || !output[ch])
+        continue;
+      float* in_arr[1] = {output[ch]};
+      float* out_arr[1] = {output[ch]};
+      s.dsp[ch]->process(in_arr, out_arr, numFrames);
+      for (int32_t i = 0; i < numFrames; ++i)
+      {
+        const float g = std::min(1.0f, static_cast<float>(s.fade_progress + i) / kFadeLenSamples);
+        output[ch][i] *= g;
+      }
+    }
+    s.fade_progress += numFrames;
+    if (s.fade_progress >= kFadeLenSamples)
+    {
+      s.fade_progress = 0;
+      s.fade_state.store(0, std::memory_order_relaxed); // transition complete
+    }
+  }
+
+  // Same reasoning as the input clamp above: different .nam models have
+  // different inherent output loudness, so an out_gain boost that didn't
+  // clip the previous model can push a louder new model's output well past
+  // +-1.0 -- with nothing downstream to catch it, that's raw float overflow
+  // reaching the audio hardware, heard as sustained distortion for as long
+  // as that model + trim setting are active, not just a switch-moment glitch.
+  for (uint32_t ch = 0; ch < numChannels; ++ch)
+    if (input[ch] && output[ch])
+      for (int32_t i = 0; i < numFrames; ++i)
+        output[ch][i] = std::clamp(output[ch][i] * out_gain, -1.0f, 1.0f);
 }
 
 // ---- Input/Output trim (current, additive design only) ----
@@ -380,19 +943,6 @@ TrimState& trim_state()
 {
   static TrimState t;
   return t;
-}
-
-float trim_max_db()
-{
-  if (const char* env = std::getenv("NAM_TRIM_MAX_DB"))
-    return std::strtof(env, nullptr);
-  return 12.0f;
-}
-
-float trim_gain(float raw)
-{
-  const float db = std::clamp(raw, -1.0f, 1.0f) * trim_max_db();
-  return std::pow(10.0f, db / 20.0f);
 }
 
 extern "C" void nam_set_input_trim(void* /*this_*/, float value)

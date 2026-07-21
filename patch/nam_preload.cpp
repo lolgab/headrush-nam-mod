@@ -26,11 +26,35 @@
 #include <cstdio>
 #include <cstdlib>
 #include <dlfcn.h>
+#include <string_view>
+#include <unistd.h>
 
 #define NAM_HOOK_LIB_PATH "/usr/Evil/libnam_hook.so"
+#define EXPECTED_EXE_PATH "/usr/Evil/Evil"
 
 namespace
 {
+
+// LD_PRELOAD (and the NAM_HOOK_SLOT_* env vars) are set only for the
+// /usr/Evil/Evil exec itself, but environment variables are inherited by
+// EVERY child process a program forks/execs, not just the one they were
+// meant for. If Evil itself shells out to any helper (e.g. for USB mass-
+// storage/file-transfer plumbing), that helper inherits these vars too,
+// and this library's constructor would run inside it as well. The
+// NAM_HOOK_SLOT_* addresses are hardcoded absolute addresses valid ONLY
+// inside Evil's own non-PIE memory layout -- writing them into an unrelated
+// process is at best a no-op, at worst a crash in that process. Refuse to
+// touch anything unless we can confirm we're actually running inside the
+// genuine, patched Evil binary.
+bool running_inside_evil()
+{
+  char buf[64];
+  ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+  if (n <= 0)
+    return false;
+  buf[n] = '\0';
+  return std::string_view(buf) == EXPECTED_EXE_PATH;
+}
 
 // Installs one hook: dlsym `sym_name` from `lib`, write it into the hook_slot
 // whose address comes from env var `env_name` (skipped entirely if unset --
@@ -64,6 +88,13 @@ void install_one_hook(void* lib, const char* sym_name, const char* env_name)
 
 __attribute__((constructor)) static void install_nam_hooks()
 {
+  if (!running_inside_evil())
+  {
+    fprintf(stderr, "[nam_preload] not running as " EXPECTED_EXE_PATH
+                    " (inherited LD_PRELOAD in some other process?) -- skipping entirely\n");
+    return;
+  }
+
   void* lib = dlopen(NAM_HOOK_LIB_PATH, RTLD_NOW | RTLD_GLOBAL);
   if (!lib)
   {
@@ -76,4 +107,13 @@ __attribute__((constructor)) static void install_nam_hooks()
   install_one_hook(lib, "nam_set_output_trim", "NAM_HOOK_SLOT_NAML_TRIM_OUT_ADDR");
   install_one_hook(lib, "nam_process_gonk", "NAM_HOOK_SLOT_GONK_ADDR");
   install_one_hook(lib, "nam_process", "NAM_HOOK_SLOT_ADDR");
+
+  // The one-time *.nam model preload (nam_hook.cpp's
+  // preload_models_in_background) is deliberately NOT triggered from here.
+  // An earlier version called it unconditionally at this exact point (every
+  // boot, regardless of whether Anxiety OD is ever used) and that made the
+  // USB-transfer hang happen on every boot instead of only boots that
+  // actually engaged the pedal -- see preload_models_in_background's own
+  // comment. It's triggered lazily instead, from inside nam_hook.cpp itself
+  // the first time the hijacked process() actually runs.
 }
