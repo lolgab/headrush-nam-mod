@@ -175,9 +175,9 @@ re-validate under QEMU before trying it on real hardware.
 
 ## License
 
-The patch scripts and glue code in this repo have no license file yet —
-treat as all-rights-reserved by the author until one is added. `nam_core/`
-is MIT-licensed by its own upstream project (Steven Atkinson).
+The patch scripts and glue code in this repo are licensed under the
+[GNU GPLv3](LICENSE). `nam_core/` is MIT-licensed by its own upstream
+project (Steven Atkinson).
 
 This project reverse-engineers and modifies HeadRush Pedalboard firmware,
 which is not affiliated with or endorsed by inMusic/HeadRush. Use at your
