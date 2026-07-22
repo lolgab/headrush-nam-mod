@@ -4,48 +4,89 @@ Reverse-engineered firmware mod for the HeadRush Pedalboard, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
-**Status**: a real, working NAM pedal today, via a hijacked pedal slot. A
-second, *additive* pedal design (own pedal type, nothing sacrificed) also
-exists but is **not applied by the build** — it's unreachable from Evil's
-own UI. See [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md) for that research.
+**Status**: a real, working NAM pedal today, via a hijacked pedal slot,
+confirmed on real hardware.
 
-## What this does
+## For users
+
+### Quick start (macOS)
+
+Turns the stock HeadRush Pedalboard 2.7 firmware updater into a NAM-modded
+one, in one command:
+
+```sh
+git clone --recurse-submodules <this-repo-url>
+cd headrush-nam-mod
+./scripts/quickstart_mac.sh
+```
+
+This checks you have the required build tools installed (prints the exact
+`brew install` commands and stops if anything's missing — it never installs
+anything itself), downloads the official HeadRush Pedalboard 2.7 Mac
+updater, patches it with the NAM mod, and drops two apps in your current
+directory:
+
+```
+HeadRush Pedalboard 2.7 Firmware Updater (NAM mod).app   <- run this to flash
+HeadRush Pedalboard 2.7 Firmware Updater.app             <- unmodified, keep for recovery
+```
+
+**Flashing:**
+
+1. Put your device in firmware-update mode. See
+   [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a
+   walkthrough.
+2. Run the updater
+
+**Using it**:
+
+Drop `.nam` files into their own **`/NAM`** folder on the USB drive (sibling
+to `Impulse Responses`, `Blocks`, `Rigs`, etc — create it yourself via the
+File Manager/USB transfer view if it doesn't exist yet). Files are sorted
+alphabetically and divided evenly across the Model knob's sweep — name them
+with an index prefix so you know the order:
+
+- 01 - Your first model.nam
+- 02 - Your second model.nam
+- 03 - Your third model.nam
+
+on the device, add the **Anxiety OD** pedal.
+
+| Knob | Function |
+|---|---|
+| **DRIVE** | selects/scans `.nam` model files |
+| **TONE** | input trim |
+| **LEVEL** | output trim |
+
+## For developers / maintainers
+
+### What this does
 
 Takes a stock HeadRush Pedalboard **2.7** firmware update file (`Update.img`)
 and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
 `process()` function, replacing its overdrive DSP with NAM inference.
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
-on every instance. It's the pedal type this mod settled on sacrificing —
-earlier targets were tried and rejected: Gonkulator/"Ring Mod" turned out to
-be dead code (not wired to any UI page, so the hook never fired), and Volume
-worked but is needed for its real job (expression-pedal control).
+on every instance. It's fine since there is Anxiety OS V2 that is still available.
 
-### The three knobs
+#### Knob implementation
 
-Anxiety OD's on-screen labels are patched to match what they now do:
+Anxiety OD's on-screen labels are patched to match what they now do (see
+"Using it" under For users above for what each knob does day to day):
 
-| Original | Relabeled | Function |
-|---|---|---|
-| Drive | **Model** | selects/scans `.nam` model files |
-| Tone | **Inp** | input trim |
-| Level | **Outp** | output trim |
-| Hi-Lo | *(unchanged)* | not wired to anything |
+| Original | Function |
+|---|---|
+| Drive | selects/scans `.nam` model files |
+| Tone | input trim |
+| Level | output trim |
+| Hi-Lo | doesn't do to anything |
 
-**Model select**: drop `.nam` files into their own **`/NAM`** folder on the
-USB drive (sibling to `Impulse Responses`, `Blocks`, `Rigs`, etc. — create it
-yourself via the File Manager/USB transfer view if it doesn't exist yet).
-This has to be its own folder rather than reusing `Impulse Responses` —
-Evil's own IR-folder sync purges anything it doesn't recognize as a real IR
-(i.e. non-`.wav`) every time the USB transfer view reopens, confirmed on real
-hardware. `/NAM` is untouched by that sync.
-
-Files are sorted alphabetically; the Model knob's full sweep divides into N
-equal zones, one per file found — turn it to switch models. The folder is
-scanned once, the first time Anxiety OD's `process()` runs — but that now
-happens regardless of bypass state, not gated behind the pedal's first
-non-bypass engage (see below). After that, switching models is instant — it
-re-parses already-cached JSON, no disk I/O.
+The Model knob's full sweep divides into N equal zones, one per `.nam` file
+found (sorted alphabetically). The `/NAM` folder is scanned once, the first
+time Anxiety OD's `process()` runs — but that now happens regardless of
+bypass state, not gated behind the pedal's first non-bypass engage (see
+below). After that, switching models is instant — it re-parses already-
+cached JSON, no disk I/O.
 
 Loading at Evil startup itself (via the `LD_PRELOAD` constructor, before
 Evil's own `main()` runs) was tried twice and reverted both times on real
@@ -63,13 +104,12 @@ disguise — this way the model is already loaded and warmed up (or very
 close to it) by the time the user actually engages it, without needing any
 new thread-spawn timing.
 
-**Trim knobs**: both are `[0, 1]` with 0.5 = unity/0dB, 1.0 = +12dB boost
-(override via `NAM_TRIM_MAX_DB`), and below 0.5 fades linearly to true
-silence at 0 — matching how a physical volume knob feels near its minimum.
+Trim range (`[0, 1]`, 0.5 = unity/0dB, 1.0 = +12dB boost, fades to true
+silence below 0.5) is overridable via `NAM_TRIM_MAX_DB`.
 
-**Model switching** uses a ~100ms duck-and-switch crossfade (fade out old
-model, fade in new one already warmed up) rather than a hard cut, to avoid
-an audible click. Every thread that runs NAM inference (the real-time audio
+Model switching is implemented as a ~100ms duck-and-switch crossfade (fade
+out old model, fade in new one already warmed up) rather than a hard cut.
+Every thread that runs NAM inference (the real-time audio
 thread and this library's own background load/prewarm thread) also sets the
 ARM VFP/NEON flush-to-zero bit on entry -- `-ffast-math`'s own runtime
 support only sets it on whichever thread happens to run this `.so`'s static
@@ -122,7 +162,10 @@ past its deadline -- same mechanism as
   entirely (it's very likely used as an internal type-name lookup key, not
   just a label).
 
-## Prerequisites
+### Prerequisites (manual build)
+
+`scripts/quickstart_mac.sh` (see Quick start above) checks these for you.
+To run `build.sh` directly instead:
 
 ```sh
 brew install e2fsprogs u-boot-tools
@@ -140,7 +183,7 @@ equivalent packages, but the toolchain lookup in
 Homebrew keg paths and bare `PATH` — patch that class if your distro puts
 things elsewhere.
 
-## Setup
+### Setup
 
 ```sh
 git clone --recurse-submodules <this-repo-url>
@@ -154,7 +197,7 @@ You'll also need a stock **HeadRush Pedalboard 2.7** firmware updater — get
 (Mac) or equivalent (Windows). This repo does not include or distribute
 HeadRush's firmware.
 
-## Usage
+### Usage
 
 ```sh
 ./build.sh /path/to/stock/Update.img /path/to/output/Update_nam.img
@@ -169,7 +212,7 @@ minutes (most of it is cross-compiling NAM's DSP core).
 Pass `--keep-work-dir` to leave the intermediate build directory in place
 (printed at the start of the run) for inspection/debugging.
 
-## Flashing (manual — this repo does not do this for you)
+### Flashing (manual — if you built `Update.img` directly instead of using `quickstart_mac.sh`)
 
 1. **Back up the original, unmodified `Update.img`** somewhere safe. You
    will want it if anything goes wrong.
@@ -183,11 +226,17 @@ Pass `--keep-work-dir` to leave the intermediate build directory in place
 
 The FIT image format has no cryptographic signature check on the rootfs
 itself (only SHA1 integrity hashes, which `mkimage` recomputes correctly for
-the modified data) — but this was never tested against a real device by
-this project's authors beyond what's noted above. Proceed at your own risk.
+the modified data). Tested on a real HeadRush Pedalboard 2.7 device: NAM
+inference works, and the device can be safely recovered back to stock
+firmware via the footswitch recovery mode (see step 4 above, and
+[this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a walkthrough).
+Proceed at your own risk.
 
-## Repo layout
+### Repo layout
 
+- `scripts/quickstart_mac.sh` — one-command macOS path: checks tools,
+  downloads the stock Mac updater, runs the build, and patches a copy of
+  the updater app in place. See Quick start above.
 - `scripts/build_update_img.py` — the actual build pipeline (extraction,
   patching, cross-compilation, repacking, verification).
 - `scripts/fit_image.py` — minimal FDT/FIT image reader used to pull the
