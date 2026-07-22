@@ -42,10 +42,26 @@ hardware. `/NAM` is untouched by that sync.
 
 Files are sorted alphabetically; the Model knob's full sweep divides into N
 equal zones, one per file found — turn it to switch models. The folder is
-scanned once, lazily, the first time the pedal is actually used (not at
-boot — an eager boot-time scan made USB-transfer hangs worse on real
-hardware). After that, switching models is instant — it re-parses already
-cached JSON, no disk I/O.
+scanned once, the first time Anxiety OD's `process()` runs — but that now
+happens regardless of bypass state, not gated behind the pedal's first
+non-bypass engage (see below). After that, switching models is instant — it
+re-parses already-cached JSON, no disk I/O.
+
+Loading at Evil startup itself (via the `LD_PRELOAD` constructor, before
+Evil's own `main()` runs) was tried twice and reverted both times on real
+hardware: once as an unconditional filesystem scan (made USB-transfer hangs
+worse), and once as just spawning the background thread that early (broke
+boot entirely — clicking every ~500ms, stuck on the splash screen; spawning
+a thread that early in process startup is evidently unsafe on this device).
+Instead, the load/duck-and-switch/prewarm logic in `nam_process_gonk` now
+runs unconditionally on every `process()` call, with the bypass check moved
+to right before the only place it actually needs to change behavior (the
+produced audio) instead of gating the load itself. Anxiety OD commonly sits
+bypassed on a board from power-on until footswitched, so gating the load
+behind non-bypass was effectively still a lazy-at-first-use load in
+disguise — this way the model is already loaded and warmed up (or very
+close to it) by the time the user actually engages it, without needing any
+new thread-spawn timing.
 
 **Trim knobs**: both are `[0, 1]` with 0.5 = unity/0dB, 1.0 = +12dB boost
 (override via `NAM_TRIM_MAX_DB`), and below 0.5 fades linearly to true
@@ -53,7 +69,25 @@ silence at 0 — matching how a physical volume knob feels near its minimum.
 
 **Model switching** uses a ~100ms duck-and-switch crossfade (fade out old
 model, fade in new one already warmed up) rather than a hard cut, to avoid
-an audible click.
+an audible click. Every thread that runs NAM inference (the real-time audio
+thread and this library's own background load/prewarm thread) also sets the
+ARM VFP/NEON flush-to-zero bit on entry -- `-ffast-math`'s own runtime
+support only sets it on whichever thread happens to run this `.so`'s static
+initializers, not on Evil's pre-existing audio thread or on threads we spawn
+ourselves (this bit is per-thread, never inherited). Left unset, a WaveNet's
+hidden state decaying toward silence during the fade/prewarm hits denormals,
+which take a slow microcoded path on ARM and can stall a real-time callback
+past its deadline -- same mechanism as
+[mixxxdj/mixxx#16126](https://github.com/mixxxdj/mixxx/issues/16126).
+- Every thread this library spawns itself (the preload scan and the
+  per-switch construct/calibrate/prewarm) runs at the lowest niceness —
+  this device has one ARM core, shared with Evil's own real-time audio
+  thread, and none of this background work is latency-sensitive. Reported
+  on real hardware as distinct glitches landing right at model-construction
+  time, both on Anxiety OD's first-ever engage and on every later switch
+  (construction/prewarm always re-runs for a newly-selected model, cache or
+  not). Lowering niceness costs nothing and gives the kernel every reason
+  to always favor the audio thread under contention.
 
 ### Safety details baked into the hook
 

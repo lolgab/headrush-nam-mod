@@ -110,10 +110,23 @@ __attribute__((constructor)) static void install_nam_hooks()
 
   // The one-time *.nam model preload (nam_hook.cpp's
   // preload_models_in_background) is deliberately NOT triggered from here.
-  // An earlier version called it unconditionally at this exact point (every
-  // boot, regardless of whether Anxiety OD is ever used) and that made the
-  // USB-transfer hang happen on every boot instead of only boots that
-  // actually engaged the pedal -- see preload_models_in_background's own
-  // comment. It's triggered lazily instead, from inside nam_hook.cpp itself
-  // the first time the hijacked process() actually runs.
+  // Tried TWICE now, both reverted:
+  //   1. Called unconditionally from here, synchronously doing the actual
+  //      scan -- made the USB-transfer view hang worse (every boot, not just
+  //      boots that engaged Anxiety OD).
+  //   2. Called from here via nam_preload_models() (still exported, unused
+  //      now), which only kicks off preload_models_in_background()'s
+  //      spawn_detached (a real pthread_create) -- NOT the scan itself doing
+  //      anything synchronously slow, just spawning the thread. Confirmed on
+  //      real hardware this broke boot entirely: relay clicking every ~500ms,
+  //      stuck on the splash screen, never reaching the real UI -- a crash/
+  //      respawn loop. This constructor runs via ld.so's DT_INIT_ARRAY
+  //      processing, BEFORE Evil's own main() -- spawning a pthread that
+  //      early, before whatever Evil's own startup expects to have already
+  //      initialized, is evidently unsafe on this device's actual libc/
+  //      threading stack (works fine on a desktop/QEMU test harness, which
+  //      is how attempt #2 passed every test available pre-hardware).
+  // Triggered lazily instead, from inside nam_hook.cpp itself the first time
+  // the hijacked process() actually runs -- by which point Evil's own main
+  // loop is unquestionably already up and running real-time audio.
 }

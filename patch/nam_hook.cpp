@@ -59,6 +59,7 @@
 #include <mutex>
 #include <pthread.h>
 #include <string>
+#include <sys/resource.h>
 #include <type_traits>
 #include <unistd.h>
 #include <vector>
@@ -106,6 +107,67 @@ void spawn_detached(F&& fn)
 // TODO: confirm Evil's actual engine sample rate (48000 assumed; check
 // /Engine/... property tree or IRLoaderController's Reset() call site).
 constexpr double kSampleRate = 48000.0;
+
+// -ffast-math's crtfastmath.o sets the VFP/NEON flush-to-zero bit, but only
+// on whichever thread happens to run this .so's static initializers --
+// typically whatever thread calls dlopen() on us, NOT Evil's own
+// already-running real-time audio thread, and NOT any thread this library
+// spawns itself via pthread_create (FPSCR/FPCR is per-thread state, never
+// inherited -- confirmed as the exact mechanism behind
+// https://github.com/mixxxdj/mixxx/issues/16126, an almost identical
+// real-hardware symptom: "full-volume digital noise" once a missing FZ bit
+// let a denormal stall a real-time audio callback past its deadline).
+// Without this, a WaveNet's internal hidden state naturally decays toward
+// (but never quite reaches) zero during the ~100ms duck-and-switch
+// fade-to-silence and during the silent prewarm blocks below -- exactly
+// where denormals are most likely -- and denormal float arithmetic on ARM
+// takes a slow microcoded path, a real source of the residual switch-time
+// noise this is meant to close (on top of the fade/prewarm already in
+// place). Cheap enough (a couple of instructions) to just call
+// unconditionally at the top of every function that runs DSP::process(),
+// on every thread that might do so -- there's no "set once, applies
+// everywhere" version of this bit.
+inline void flush_denormals_to_zero()
+{
+#if defined(__arm__)
+  uint32_t fpscr;
+  asm volatile("vmrs %0, fpscr" : "=r"(fpscr));
+  fpscr |= (1u << 24); // FZ
+  asm volatile("vmsr fpscr, %0" : : "r"(fpscr));
+#elif defined(__aarch64__)
+  uint64_t fpcr;
+  asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+  fpcr |= (1ull << 24); // FZ
+  asm volatile("msr fpcr, %0" : : "r"(fpcr));
+#endif
+  // Host/x86 test builds: deliberately a no-op -- SSE's own FTZ/DAZ
+  // (MXCSR) is a different register this isn't attempting to manage, and
+  // denormal stalls there don't reproduce the real-hardware symptom this
+  // exists for.
+}
+
+// Every *.nam model this library ever constructs/prewarms/benchmarks
+// (preload_models_in_background's validity check, and
+// switch_model_in_background's full construct-calibrate-prewarm) happens on
+// a thread WE spawned, competing for the same single ARM core as Evil's own
+// real-time audio thread -- this device has no SMP to keep them apart.
+// Reported on real hardware as several distinct glitches landing right at
+// model construction time, both on the very first Anxiety OD engage (the
+// first-ever model load) and on every later switch (which redoes this same
+// construct-prewarm work for whichever model is newly selected, cache or no
+// cache -- see g_calibration_cache's own comment on what IS cached).
+// Lowering this thread's niceness costs nothing (this work is not latency-
+// sensitive -- nothing is listening for its result except the fade logic,
+// which is happy to wait) and gives the kernel's scheduler every reason to
+// always favor Evil's audio thread under contention, on Linux this is
+// per-thread state (setpriority(PRIO_PROCESS, 0, ...) with who=0 resolves to
+// the CALLING thread's own kernel task, not the whole process -- unlike
+// POSIX's nominal process-wide semantics), so this can never lower priority
+// for Evil's own threads, only threads this library spawns itself.
+inline void lower_background_thread_priority()
+{
+  setpriority(PRIO_PROCESS, 0, 19); // 19 = lowest (nicest) niceness
+}
 
 // Folder scanned for *.nam files. Originally piggybacked "Impulse
 // Responses" (matching how real IRs work), but Evil's own IR-folder sync
@@ -188,27 +250,21 @@ float trim_gain(float raw01)
 }
 
 // Every *.nam file under model_dir() is read and JSON-parsed exactly ONCE,
-// the first time Anxiety OD is actually engaged (see ensure_models_preloaded,
-// called from switch_model_in_background), and kept in memory for the rest
-// of the boot -- model switching after that never touches the filesystem at
-// all, it just re-constructs a nam::DSP from the already-in-memory JSON.
+// the first time Anxiety OD is actually engaged, and kept in memory for the
+// rest of the boot -- model switching after that never touches the
+// filesystem at all, it just re-constructs a nam::DSP from the already-
+// in-memory JSON.
 //
-// Deliberately triggered LAZILY, not eagerly at Evil startup. An earlier
-// version called this unconditionally from nam_preload.cpp's constructor
-// (i.e. every single boot, whether or not Anxiety OD is ever added).
-// Confirmed on real hardware this made the USB-transfer hang WORSE -- it
-// started happening even on boots that never touched Anxiety OD at all,
-// exactly matching the one thing that changed (this scan going from
-// conditional-on-pedal-use to unconditional-every-boot). Whatever the exact
-// mechanism, simply enumerating model_dir() via std::filesystem appears to
-// conflict with the USB mass-storage subsystem -- note get_dsp() itself
-// never held a file open during processing even before this change (a
-// short-lived std::ifstream, always fully closed before returning -- see
-// NAM/get_dsp.cpp), so "files kept open during processing" was never
-// actually the mechanism. Keeping the scan conditional on real pedal use
-// (as it always was pre-refactor) still gets the "never re-scan on every
-// switch" benefit without touching the filesystem on boots that don't need
-// it.
+// Deliberately triggered LAZILY, not eagerly at Evil startup. Tried eager
+// TWICE now, both reverted on real hardware -- see nam_preload.cpp's own
+// comment (right where the eager call would go) for both failure modes:
+// an unconditional-every-boot filesystem scan made the USB-transfer view
+// hang worse, and separately, just spawning this thread that early (from
+// the LD_PRELOAD constructor, before Evil's own main() runs) broke boot
+// entirely. Keeping this conditional on real pedal use (as it always was
+// pre-both-attempts) avoids both failure modes -- the "never re-scan on
+// every switch" benefit (see g_preload_started below) doesn't need eager
+// triggering to work, only lazy-but-cached.
 struct CachedModel
 {
   std::string display_name; // filename only, for sorting
@@ -242,6 +298,8 @@ void preload_models_in_background()
     return; // already started (or done) -- only ever run once per boot
 
   spawn_detached([]() {
+    flush_denormals_to_zero(); // brand-new thread -- see its own comment
+    lower_background_thread_priority(); // ditto -- see its own comment
     std::vector<CachedModel> found;
     std::error_code ec;
     for (const auto& entry : std::filesystem::directory_iterator(model_dir(), ec))
@@ -585,6 +643,8 @@ void switch_model_in_background(ModelState& s, float raw)
     // std::terminate() *without* unwinding (the Reset guard below would never
     // run), which not only kills the whole process but was observed to hang
     // rather than cleanly abort under QEMU-user ARM emulation.
+    flush_denormals_to_zero(); // brand-new thread -- see its own comment
+    lower_background_thread_priority(); // ditto -- see its own comment
     try
     {
       struct Reset
@@ -690,6 +750,8 @@ void switch_model_in_background(ModelState& s, float raw)
 // shipped design, kept for the proven IRLoader-hook fallback path.
 extern "C" void nam_process(void* this_)
 {
+  flush_denormals_to_zero(); // see its own comment -- Evil's real-time audio
+                              // thread, not one we spawned ourselves
   auto* self = reinterpret_cast<uint8_t*>(this_);
   float* input = *reinterpret_cast<float**>(self + 0x68);
   float* output = *reinterpret_cast<float**>(self + 0x6c);
@@ -744,6 +806,8 @@ constexpr int32_t kFadeLenSamples = 4800;
 extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
                                   float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
 {
+  flush_denormals_to_zero(); // see its own comment -- Evil's real-time audio
+                              // thread, not one we spawned ourselves
   if (numFrames <= 0 || !input || !output || numChannels == 0)
     return;
   if (numChannels > kMaxChannels)
@@ -756,16 +820,19 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
   const float level_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x520);  // output trim
   const uint8_t bypass_byte = *(reinterpret_cast<uint8_t*>(this_) + 0x26b);
 
-  // Bypass takes precedence over everything else, including "not ready yet"
-  // -- dry passthrough unconditionally.
-  if (bypass_byte != 0)
-  {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
-      if (input[ch] && output[ch])
-        std::memcpy(output[ch], input[ch], static_cast<size_t>(numFrames) * sizeof(float));
-    return;
-  }
-
+  // Bypass is checked further down now, right before the first place it
+  // actually needs to change behavior (the produced audio) -- NOT here.
+  // Checking it here and returning early used to mean the knob-change
+  // detection/switch-trigger/pending-pickup block below never ran at all
+  // while the pedal sat bypassed, so a model never even started loading
+  // until the user's first non-bypass engage -- the exact moment most
+  // likely to be heard, since real audio is already flowing by then. Anxiety
+  // OD commonly sits bypassed on a board from power-on until footswitched,
+  // so this was effectively still a lazy-at-first-use load in disguise, not
+  // eager-at-boot. Running this block regardless of bypass costs nothing
+  // (no audio is produced from it either way) and means the load/duck-and-
+  // switch/prewarm all happen in the background WHILE bypassed, finishing
+  // (or getting much closer to finished) before the user ever un-bypasses.
   const float prev = s.last_seen_knob_raw.exchange(drive_raw, std::memory_order_acq_rel);
   bool ready = s.ready.load(std::memory_order_acquire);
   // NaN-safe inequality: prev != prev is true only for the initial NaN
@@ -815,7 +882,11 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     }
   }
 
-  if (!ready)
+  // Bypass takes precedence over everything from here on, including
+  // "not ready yet" -- dry passthrough unconditionally. Deliberately checked
+  // here, AFTER the load/switch/pending-pickup block above, not before it --
+  // see that block's own comment.
+  if (bypass_byte != 0 || !ready)
   {
     for (uint32_t ch = 0; ch < numChannels; ++ch)
       if (input[ch] && output[ch])
@@ -970,6 +1041,8 @@ extern "C" void nam_process_naml(void* this_, uint32_t /*param2*/, float** input
                                   uint32_t numChannels, float** output, int32_t numFrames,
                                   uint32_t* /*flags*/, void* /*ctx*/)
 {
+  flush_denormals_to_zero(); // see its own comment -- Evil's real-time audio
+                              // thread, not one we spawned ourselves
   if (numFrames <= 0 || !input || !output || numChannels == 0)
     return;
   if (numChannels > kMaxChannels)
