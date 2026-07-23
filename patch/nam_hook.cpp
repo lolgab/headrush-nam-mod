@@ -394,6 +394,12 @@ struct ModelState
   std::atomic<float> last_seen_knob_raw{std::numeric_limits<float>::quiet_NaN()};
   // Debounce for switch_model_in_background -- see its own comment.
   std::atomic<int64_t> last_switch_attempt_ms{0};
+  // Knob-settle tracking (see nam_process_gonk's own comment on the
+  // "3 buzzes in a row" cascade this fixes) -- audio-thread-only, no atomic
+  // needed beyond what's already required for cross-thread visibility of
+  // active_index/pending_index elsewhere.
+  int candidate_index = -1;
+  int64_t candidate_since_ms = 0;
 
   // Duck-and-switch model transition (see nam_process_gonk's own comment).
   // The background load thread builds the new model into pending_dsp/
@@ -518,6 +524,17 @@ void load_fixed_path_in_background()
 // anything faster than this is either noise or a wrong-offset assumption,
 // not real input.
 constexpr int64_t kMinSwitchIntervalMs = 250;
+
+// How long the knob must stay resolved to the SAME zone before a switch is
+// even attempted for it -- see nam_process_gonk's own comment on the
+// "several buzzes in a row on one knob turn" cascade this fixes. A real
+// turning gesture sweeps through every zone between start and end; without
+// this, each zone briefly passed through could start (and sometimes finish
+// and get installed, each with its own full duck-and-switch fade) before the
+// knob moved on. 150ms is comfortably longer than the brief hand-deceleration
+// pauses within a single continuous turn, but short enough not to feel
+// laggy once the knob actually stops.
+constexpr int64_t kKnobSettleMs = 150;
 
 int64_t now_ms()
 {
@@ -660,6 +677,8 @@ void switch_model_in_background(ModelState& s, float raw)
 
       std::unique_ptr<nam::DSP> loaded[kMaxChannels];
       double chosen_ratio = 1.0;
+      constexpr int32_t kPrewarmSamples = 16384;
+      constexpr int32_t kPrewarmBlockSize = 128;
       for (int i = 0; i < kMaxChannels; ++i)
       {
         auto& d = loaded[i];
@@ -704,6 +723,32 @@ void switch_model_in_background(ModelState& s, float raw)
             slimmable->SetSlimmableSize(chosen_ratio);
         }
 
+        // calibrate_slimmable_quality (above, channel-0/cache-miss path only)
+        // calls dsp.Reset(kSampleRate, kCalibrationBlockSize) once per tier
+        // while benchmarking, which -- same as any Reset() call -- resizes
+        // mMaxBufferSize to that tier's benchmark block size (48), not back to
+        // the 128 set at the top of this loop. Confirmed via host-side wav
+        // testing (no device/emulation needed to hit this): the very first
+        // time ANY SlimmableModel-architecture .nam file is ever selected
+        // (first cache miss), the manual prewarm loop right below then calls
+        // process() with kPrewarmBlockSize=128 against a model whose
+        // mMaxBufferSize is still 48 from calibration's last Reset --
+        // `assert(num_frames <= mMaxBufferSize)` in wavenet/model.cpp fires
+        // immediately. Worse than a normal crash: this runs on a
+        // pthread_create'd thread (see spawn_detached's own comment), so
+        // assert()'s abort() is NOT a catchable C++ exception -- the
+        // surrounding try/catch never sees it, and abort() takes down the
+        // WHOLE PROCESS, not just this thread. Almost certainly a real
+        // contributor to the "occasional full-device reboots when repeatedly
+        // switching models" noted above (that comment blamed only CPU/timing
+        // churn) -- and matches the "occasional" pattern exactly, since only
+        // a first-time (cache-miss) selection of a given slimmable model hits
+        // it; switching back to an already-calibrated one does not re-Reset
+        // and never shrinks the buffer. Unconditional and harmless for
+        // non-slimmable models too (mMaxBufferSize is already 128 for them;
+        // this is a no-op resize to the same value).
+        d->Reset(kSampleRate, kPrewarmBlockSize);
+
         // Explicit manual prewarm: process silence through the model to let
         // its internal WaveNet history/hidden state settle BEFORE any real
         // (or duck-and-switch fade-in) audio ever reaches it. DSP::Reset()
@@ -716,8 +761,6 @@ void switch_model_in_background(ModelState& s, float raw)
         // hardware. ~340ms of silence at 48kHz is comfortably more than any
         // realistic guitar-amp WaveNet's receptive field.
         {
-          constexpr int32_t kPrewarmSamples = 16384;
-          constexpr int32_t kPrewarmBlockSize = 128;
           std::vector<float> silence(kPrewarmBlockSize, 0.0f);
           std::vector<float> scratch(kPrewarmBlockSize, 0.0f);
           float* in_arr[1] = {silence.data()};
@@ -801,7 +844,27 @@ extern "C" void nam_process(void* this_)
 // risks a worse dropout than the glitch this is meant to fix. Duck-and-
 // switch never runs two models at once, at the cost of a brief dip instead
 // of a true blend.
-constexpr int32_t kFadeLenSamples = 4800;
+//
+// Overridable via NAM_FADE_LEN_SAMPLES -- host-side wav testing only, to
+// sweep this value against real .nam models without a hardware/QEMU round
+// trip each time.
+//
+// Default kept at the real-hardware-confirmed 4800 (100ms). Host-side
+// measurement (dlopen'd libnam_hook.so, real nam_process_gonk calls, real
+// .nam models, real wav, no device/QEMU) suggested click size stays flat
+// down to ~40 samples, and a build with the default dropped to 128
+// (~2.7ms) was flashed to real hardware -- it reintroduced audible
+// distortion on model switch that the 4800-sample default did not have.
+// The device's real audio thread jitter/analog output stage evidently
+// doesn't behave like the host-side simulation here, so do not lower this
+// default again without re-confirming on real hardware, not just host wav
+// sweeps.
+int32_t fade_len_samples()
+{
+  if (const char* env = std::getenv("NAM_FADE_LEN_SAMPLES"))
+    return std::max(1, std::atoi(env));
+  return 4800;
+}
 
 extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
                                   float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
@@ -814,6 +877,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     numChannels = kMaxChannels;
 
   auto& s = state_for(this_); // per-engine-instance state -- see its own comment
+  const int32_t kFadeLenSamples = fade_len_samples();
 
   const float drive_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x534); // model select
   const float tone_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x548);   // input trim
@@ -835,14 +899,42 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
   // (or getting much closer to finished) before the user ever un-bypasses.
   const float prev = s.last_seen_knob_raw.exchange(drive_raw, std::memory_order_acq_rel);
   bool ready = s.ready.load(std::memory_order_acquire);
-  // NaN-safe inequality: prev != prev is true only for the initial NaN
-  // sentinel, guaranteeing the first call always attempts a load. Also
-  // retries whenever not yet ready (debounced inside
-  // switch_model_in_background) -- covers both the lazy model preload (see
-  // preload_models_in_background) not having started/finished yet, and a
-  // model switch still in flight.
-  if (drive_raw != prev || prev != prev || !ready)
-    switch_model_in_background(s, drive_raw);
+  if (!ready)
+  {
+    // NaN-safe inequality: prev != prev is true only for the initial NaN
+    // sentinel, guaranteeing the first call always attempts a load. No
+    // settle delay here -- nothing is playing yet to protect from a
+    // premature switch, so get the first model in as fast as possible (also
+    // retries every call while not yet ready, debounced inside
+    // switch_model_in_background -- covers the lazy model preload, see
+    // preload_models_in_background, not having started/finished yet).
+    if (drive_raw != prev || prev != prev)
+      switch_model_in_background(s, drive_raw);
+  }
+  else
+  {
+    // Only start a background load once the knob has RESOLVED TO, AND
+    // STAYED ON, the same zone for kKnobSettleMs -- see that constant's own
+    // comment. Without this, a real turning gesture sweeping from one zone
+    // to a distant one passes through every zone in between, and each one
+    // it merely passed through could still start its own load; if that load
+    // happened to finish before the knob moved on again, the drop-if-stale
+    // check below has nothing to catch (the knob briefly WAS at that zone
+    // when it was picked up) and it gets installed with a full audible
+    // duck-and-switch fade -- heard on real hardware as several distinct
+    // "buzz" transitions in a row from one single knob turn.
+    const int target_idx = knob_value_to_index(drive_raw, static_cast<int>(g_cached_models.size()));
+    if (target_idx != s.candidate_index)
+    {
+      s.candidate_index = target_idx;
+      s.candidate_since_ms = now_ms();
+    }
+    else if (target_idx >= 0 && target_idx != s.active_index.load(std::memory_order_acquire)
+             && now_ms() - s.candidate_since_ms >= kKnobSettleMs)
+    {
+      switch_model_in_background(s, drive_raw);
+    }
+  }
 
   // Pick up a finished background load, if any. Only the audio thread ever
   // installs into dsp[] -- see ModelState's own comment.
@@ -1110,4 +1202,28 @@ extern "C" int nam_debug_is_switching_naml(void)
 extern "C" int nam_debug_active_index_naml(void)
 {
   return state_naml().active_index.load(std::memory_order_acquire);
+}
+
+// Per-instance variants of the above, for nam_process_gonk's hijack path,
+// which is keyed by engine-object pointer (state_for()), not the single
+// state()/state_naml() singletons the four functions above read. Test/debug
+// only, same as the rest of this section.
+extern "C" int nam_debug_is_switching_for(void* this_)
+{
+  return state_for(this_).switching.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+extern "C" int nam_debug_active_index_for(void* this_)
+{
+  return state_for(this_).active_index.load(std::memory_order_acquire);
+}
+
+extern "C" int nam_debug_fade_state_for(void* this_)
+{
+  return state_for(this_).fade_state.load(std::memory_order_acquire);
+}
+
+extern "C" int nam_debug_pending_ready_for(void* this_)
+{
+  return state_for(this_).pending_ready.load(std::memory_order_acquire) ? 1 : 0;
 }

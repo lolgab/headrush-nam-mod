@@ -6,7 +6,11 @@
 # image beats "whatever the host distro happens to have". This image is the
 # same on macOS (via Docker Desktop), Linux, and Windows/WSL2 -- see
 # scripts/build_docker.sh.
-FROM debian:bookworm-slim
+# --platform=linux/amd64: Bootlin's prebuilt 2020.08 toolchain tarball below
+# is an x86_64-host binary (no aarch64-host build exists for this release).
+# Pinning here makes the image consistent across host architectures --
+# Docker Desktop transparently emulates amd64 on Apple Silicon hosts.
+FROM --platform=linux/amd64 debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     e2fsprogs \
@@ -30,8 +34,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG TOOLCHAIN_URL=https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--glibc--stable-2020.08-1.tar.bz2
 RUN mkdir -p /opt/toolchain \
     && curl -fsSL "$TOOLCHAIN_URL" | tar -xj -C /opt/toolchain --strip-components=1
-# /opt/toolchain/bin: the arm-buildroot-linux-gnueabihf-* cross tools.
-# /usr/sbin,/sbin: debugfs/e2fsck live there on Debian (this image runs as root).
-ENV PATH="/opt/toolchain/bin:/usr/sbin:/sbin:${PATH}"
+
+# debugfs/e2fsck live in /sbin on Debian; not on PATH by default for non-root
+# login shells, but this image always runs as root anyway. Toolchain bin/
+# goes LAST: the toolchain bundles its own unprefixed python3 (3.8, no repo
+# deps installed), which would otherwise shadow Debian's python3 -- breaking
+# `docker run ... python3 scripts/build_update_img.py` and sys.executable
+# inside it. The arm-buildroot-linux-gnueabihf-* names are unique to the
+# toolchain dir, so this ordering doesn't affect finding them.
+ENV PATH="/usr/sbin:/sbin:${PATH}:/opt/toolchain/bin"
 
 WORKDIR /repo
