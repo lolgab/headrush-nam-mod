@@ -1,11 +1,11 @@
-# HeadRush Pedalboard 2.7 — Neural Amp Modeler (NAM) mod
+# HeadRush Pedalboard & MX5 (2.7) — Neural Amp Modeler (NAM) mod
 
-Reverse-engineered firmware mod for the HeadRush Pedalboard, adding
+Reverse-engineered firmware mod for the HeadRush Pedalboard and MX5, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
 **Status**: a real, working NAM pedal today, via a hijacked pedal slot,
-confirmed on real hardware.
+confirmed on real hardware — see [Supported models](#supported-models).
 
 ## For users
 
@@ -30,6 +30,11 @@ directory:
 HeadRush Pedalboard 2.7 Firmware Updater (NAM mod).app   <- run this to flash
 HeadRush Pedalboard 2.7 Firmware Updater.app             <- unmodified, keep for recovery
 ```
+
+> This one-command macOS path currently fetches the **Pedalboard** updater only.
+> For the **MX5** on macOS, extract `Update.img` from the MX5 Mac updater
+> yourself and run `./build.sh` (see [Usage](#usage)) — it auto-detects the
+> model. (The Linux/Windows quickstarts below take `--model mx5-2.7`.)
 
 ### Quick start (Linux)
 
@@ -62,14 +67,16 @@ Ubuntu):
 sudo apt install p7zip-full unzip git curl   # if not already present
 git clone --recurse-submodules <this-repo-url>
 cd headrush-nam-mod
-./scripts/quickstart_windows.sh
+./scripts/quickstart_windows.sh                 # HeadRush Pedalboard 2.7 (default)
+./scripts/quickstart_windows.sh --model mx5-2.7 # HeadRush MX5 2.7
 ```
 
-This checks required tools, downloads the official HeadRush Pedalboard 2.7
-**Windows** updater `.exe`, builds the NAM-modded `Update.img` via Docker,
-and repacks a new installer `.exe` (see "Patching the Windows updater .exe"
-under For developers for how that repacking works). It leaves two files in
-the current directory:
+This checks required tools, downloads the official HeadRush **Windows** updater
+`.exe` for the selected `--model` (default `pedalboard-2.7`; also `mx5-2.7` —
+see [Supported models](#supported-models)), builds the NAM-modded `Update.img`
+via Docker, and repacks a new installer `.exe` (see "Patching the Windows
+updater .exe" under For developers for how that repacking works). It leaves two
+files in the current directory, e.g. for the default Pedalboard:
 
 ```
 HeadRush Pedalboard 2.7 Firmware Updater - Win (NAM mod).exe   <- copy to Windows, run this to flash
@@ -109,21 +116,28 @@ on the device, add the **Anxiety OD** pedal.
 | **TONE** | input trim |
 | **LEVEL** | output trim |
 
+On the **Pedalboard** the on-screen labels are relabeled to match (Model / Inp /
+Outp); on the **MX5** they keep their original **Drive / Tone / Level** names but
+do exactly the same thing (see [Supported models](#supported-models)).
+
 ## For developers / maintainers
 
 ### What this does
 
-Takes a stock HeadRush Pedalboard **2.7** firmware update file (`Update.img`)
-and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
-`process()` function, replacing its overdrive DSP with NAM inference.
+Takes a stock HeadRush Pedalboard or MX5 **2.7** firmware update file
+(`Update.img`) and produces a modified one that hijacks the **Anxiety OD (v1)**
+pedal's `process()` function, replacing its overdrive DSP with NAM inference.
+The model is auto-detected (see [Supported models](#supported-models)).
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
 on every instance. It's fine since there is Anxiety OS V2 that is still available.
 
 #### Knob implementation
 
-Anxiety OD's on-screen labels are patched to match what they now do (see
-"Using it" under For users above for what each knob does day to day):
+Anxiety OD's on-screen labels are patched (on the **Pedalboard** only — the MX5
+keeps its stock labels, see [Supported models](#supported-models)) to match what
+they now do (see "Using it" under For users above for what each knob does day to
+day):
 
 | Original | Function |
 |---|---|
@@ -228,27 +242,31 @@ brew install armv7-unknown-linux-gnueabihf
 finds them under `/opt/homebrew/opt/...` automatically, no need to modify
 your `PATH`.)
 
-On Debian/Ubuntu (including WSL2), the equivalent is:
-
-```sh
-sudo apt install e2fsprogs u-boot-tools device-tree-compiler xz-utils crossbuild-essential-armhf
-```
-
-`scripts/build_update_img.py`'s `Toolchain` class checks both the Homebrew
-keg paths and the Debian/Ubuntu `arm-linux-gnueabihf-*` cross-toolchain
-naming, so either works with plain `./build.sh`. If your distro packages
-these differently, either adjust `PATH`/symlinks to match one of the two
-naming schemes, or skip all of this and use the Docker build below, which
-pins exact versions instead of depending on the host distro at all.
+On Debian/Ubuntu (including WSL2) **use the Docker build below**, not a
+host-installed cross-toolchain. Debian bookworm's `crossbuild-essential-armhf`
+(and Ubuntu's `arm-linux-gnueabihf-g++`) target **glibc 2.36/2.35**, which links
+the mod's shared libs against `GLIBC_2.33`/`GLIBC_2.34` symbol versions the
+device (**glibc 2.32**) can't resolve — the flashed device then **hangs on the
+boot splash** (recoverable, but wasted). You need a cross-toolchain targeting
+**glibc ≤ 2.32**; the macOS Homebrew one already does, and the Docker image
+below fetches Bootlin's glibc-2.31 one. `scripts/build_update_img.py`'s
+`Toolchain` class finds the Homebrew (`armv7-unknown-linux-gnueabihf-*`),
+Bootlin/Docker (`arm-buildroot-linux-gnueabihf-*`), and Debian
+(`arm-linux-gnueabihf-*`) namings; as a backstop it **refuses to package libs
+that need newer glibc symbols than the target device provides** (read straight
+out of the rootfs), so a too-new toolchain fails the build instead of bricking.
 
 ### Docker-based build (recommended for Linux and Windows/WSL)
 
 `debugfs`/`mkimage`'s on-disk-format compatibility is version-sensitive
 enough that pinning exact tool versions in an image beats hoping a given
 host distro's packages behave. `docker/Dockerfile` builds a Debian image
-with the exact toolchain/e2fsprogs/u-boot-tools/dtc versions this repo is
-tested against; `scripts/build_docker.sh` builds that image (once, cached
-after) and runs the same `build_update_img.py` inside it:
+with the exact e2fsprogs/u-boot-tools/dtc versions this repo is tested
+against, plus a **Bootlin glibc-2.31 ARM cross-toolchain** (deliberately not
+Debian's `crossbuild-essential-armhf`, whose glibc 2.36 would produce libs the
+glibc-2.32 device can't load — see the Dockerfile comment).
+`scripts/build_docker.sh` builds that image (once, cached after) and runs the
+same `build_update_img.py` inside it:
 
 ```sh
 ./scripts/build_docker.sh /path/to/stock/Update.img /path/to/output/Update_nam.img
@@ -261,6 +279,36 @@ on macOS, Linux, and Windows/WSL2 (anywhere Docker Desktop or a Linux docker
 engine is available) — same image, same tool versions, same output,
 regardless of host OS.
 
+### Supported models
+
+Per-model addresses live in `scripts/model_targets.py`. The build auto-detects
+the model from the `Update.img`'s `compatible` string, or you force it with
+`--model`:
+
+| `--model` | Device | Firmware | `compatible` | Status |
+|---|---|---|---|---|
+| `pedalboard-2.7` | HeadRush **Pedalboard** | 2.7 | *(default)* | confirmed on real hardware |
+| `mx5-2.7` | HeadRush **MX5** | 2.7 | `inmusic,hg04` | confirmed on real hardware |
+
+**Only flash the image built for _your exact model and firmware_** — flashing
+another model's image will almost certainly brick the device. The build refuses
+to proceed if the selected model's addresses don't match the `Evil` binary in
+the `Update.img` (the Anxiety OD vtable slot must already hold the expected
+`process()` address), so a wrong `--model`/auto-detect fails loudly rather than
+producing a bad image.
+
+The MX5 port reuses everything structural (same RK3288 armv7 hard-float non-PIE
+`Evil`, same FIT/ext2/launcher layout, same Anxiety OD v1 sacrificial pedal);
+only the absolute addresses differ, re-derived from the MX5 `Evil` the way
+`patch/patch_gonkulator.py`'s docstring documents. One thing is not ported: the
+on-screen knob relabel — the MX5's labels come from a shared string pool, not a
+per-pedal QML blob, so on the MX5 the knobs keep their **Drive / Tone / Level**
+names while doing model-select / input-trim / output-trim.
+
+**MX5 recovery** differs from the Pedalboard's "footswitches 1 & 8": hold the
+**first two footswitches** while powering on to force firmware-update mode, then
+reflash the stock `Update.img`. Keep a stock copy before flashing.
+
 ### Setup
 
 ```sh
@@ -270,22 +318,27 @@ cd headrush-nam-mod
 git submodule update --init --recursive
 ```
 
-You'll also need a stock **HeadRush Pedalboard 2.7** firmware updater — get
+You'll also need a stock **HeadRush** firmware updater for your model — get
 `Update.img` out of the official `.app`/installer's `Contents/Resources/`
-(Mac) or equivalent (Windows). This repo does not include or distribute
-HeadRush's firmware.
+(Mac) or the Windows updater's payload (it's a 7-Zip self-extracting `.exe`).
+This repo does not include or distribute HeadRush's firmware.
 
 ### Usage
 
 ```sh
 ./build.sh /path/to/stock/Update.img /path/to/output/Update_nam.img
+# force a specific model instead of auto-detecting:
+./build.sh /path/to/stock/Update.img /path/to/output/Update_nam.img --model mx5-2.7
 ```
 
-This never modifies the input file. It extracts the rootfs, patches the
-`Evil` binary and its launcher script, rebuilds the two shared libraries
-that carry the actual NAM inference code, repacks everything, and verifies
-the result round-trips byte-exact before writing it out. Takes a few
-minutes (most of it is cross-compiling NAM's DSP core).
+The model is auto-detected from the `Update.img` (`--model` overrides — see
+[Supported models](#supported-models)). This never modifies the input file. It
+extracts the rootfs, patches the `Evil` binary (at the selected model's
+addresses) and its launcher script, rebuilds the two shared libraries that carry
+the actual NAM inference code, repacks everything, verifies the result
+round-trips byte-exact, and checks the built libs' glibc symbol versions are
+loadable on the target device before writing it out. Takes a few minutes (most
+of it is cross-compiling NAM's DSP core).
 
 Pass `--keep-work-dir` to leave the intermediate build directory in place
 (printed at the start of the run) for inspection/debugging.
@@ -298,17 +351,18 @@ Pass `--keep-work-dir` to leave the intermediate build directory in place
    app expects to find it (varies by updater version — check its
    `Contents/Resources/` or equivalent).
 3. Run the updater with the device in firmware-update mode.
-4. **Recovery, if a flash goes wrong**: hold footswitches 1 and 8
-   (leftmost, counting left to right) while powering on to force
-   firmware-update/recovery mode, then reflash the original `Update.img`.
+4. **Recovery, if a flash goes wrong**: force firmware-update/recovery mode by
+   holding, while powering on, footswitches **1 and 8** on the Pedalboard
+   (leftmost, counting left to right) or the **first two** footswitches on the
+   MX5, then reflash the original `Update.img`.
 
 The FIT image format has no cryptographic signature check on the rootfs
 itself (only SHA1 integrity hashes, which `mkimage` recomputes correctly for
-the modified data). Tested on a real HeadRush Pedalboard 2.7 device: NAM
-inference works, and the device can be safely recovered back to stock
+the modified data). Tested on real HeadRush Pedalboard 2.7 and MX5 2.7 devices:
+NAM inference works, and the device can be safely recovered back to stock
 firmware via the footswitch recovery mode (see step 4 above, and
-[this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a walkthrough).
-Proceed at your own risk.
+[this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a Pedalboard
+walkthrough). Proceed at your own risk.
 
 ### Patching the Windows updater .exe
 
@@ -357,7 +411,11 @@ byte-exact to stock and `Update.img` matches the patched input exactly.
   `build_update_img.py` inside it; used directly on Linux and by
   `quickstart_windows.sh`.
 - `scripts/build_update_img.py` — the actual build pipeline (extraction,
-  patching, cross-compilation, repacking, verification).
+  patching, cross-compilation, repacking, verification, glibc-compat check).
+- `scripts/model_targets.py` — per-model/firmware registry of the values that
+  differ per `Evil` (engine vtable + `process()` address, QML label offsets) that
+  lets one pipeline target the Pedalboard 2.7 and MX5 2.7. Auto-detected by
+  `compatible`.
 - `scripts/repack_windows_updater.py` — swaps `Update.img` inside the
   Windows updater `.exe`'s embedded 7z archive for a patched one. See
   "Patching the Windows updater .exe" above.
@@ -402,6 +460,6 @@ The patch scripts and glue code in this repo are licensed under the
 [GNU GPLv3](LICENSE). `nam_core/` is MIT-licensed by its own upstream
 project (Steven Atkinson).
 
-This project reverse-engineers and modifies HeadRush Pedalboard firmware,
-which is not affiliated with or endorsed by inMusic/HeadRush. Use at your
-own risk; modifying your device's firmware may void its warranty.
+This project reverse-engineers and modifies HeadRush Pedalboard and MX5
+firmware, which is not affiliated with or endorsed by inMusic/HeadRush. Use at
+your own risk; modifying your device's firmware may void its warranty.

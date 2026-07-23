@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-build_update_img.py -- take a stock HeadRush Pedalboard 2.7 Update.img and
+build_update_img.py -- take a stock HeadRush Update.img (Pedalboard 2.7 or MX5
+2.7 -- auto-detected, or pick with --model; see scripts/model_targets.py) and
 produce a modified one with the NAM (Neural Amp Modeler) mod applied via the
 Anxiety OD (v1) pedal's process() hijack (patch_gonkulator.py) -- the user's
 own choice of a pedal they're fine sacrificing board-wide (Gonkulator turned
@@ -24,6 +25,7 @@ submodule).
 """
 import argparse
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -34,6 +36,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fit_image  # noqa: E402
+import model_targets  # noqa: E402
 
 
 def die(msg):
@@ -58,27 +61,34 @@ def find_tool(candidates, hint):
 
 class Toolchain:
     """Locates build tools across macOS (Homebrew), Linux (distro packages),
-    and the docker/ image (Debian's crossbuild-essential-armhf) alike --
+    and the docker/ image (a Bootlin glibc-2.31 cross toolchain) alike --
     see scripts/build_docker.sh, the recommended way to get all of these at
     once regardless of host OS."""
 
     def __init__(self):
         mac_bin = "/opt/homebrew/opt/armv7-unknown-linux-gnueabihf/bin"
         mac_prefix = "armv7-unknown-linux-gnueabihf-"
+        # Bootlin glibc-2.31 toolchain the docker/ image installs -- targets a
+        # glibc <= the device's (2.32), unlike Debian bookworm's
+        # crossbuild-essential-armhf (glibc 2.36), whose too-new symbol versions
+        # make the device hang on boot. See docker/Dockerfile and
+        # check_glibc_compat() below.
+        docker_prefix = "arm-buildroot-linux-gnueabihf-"
         linux_prefix = "arm-linux-gnueabihf-"  # Debian/Ubuntu crossbuild-essential-armhf / gcc-arm-linux-gnueabihf
 
         def arm_tool(name):
             return find_tool(
-                [f"{mac_bin}/{mac_prefix}{name}", f"{linux_prefix}{name}", f"{mac_prefix}{name}"],
-                "install an ARM32 hard-float cross toolchain -- macOS: "
+                [f"{mac_bin}/{mac_prefix}{name}", f"{docker_prefix}{name}",
+                 f"{linux_prefix}{name}", f"{mac_prefix}{name}"],
+                "install a glibc<=2.32 ARM32 hard-float cross toolchain -- macOS: "
                 "`brew tap messense/macos-cross-toolchains && brew install armv7-unknown-linux-gnueabihf`; "
-                "Debian/Ubuntu (incl. WSL): `apt install crossbuild-essential-armhf`; "
-                "or skip all of this and use scripts/build_docker.sh instead.")
+                "Linux/Windows-WSL: use scripts/build_docker.sh (its image installs a glibc-2.31 toolchain).")
 
         self.arm_as = arm_tool("as")
         self.arm_objcopy = arm_tool("objcopy")
         self.arm_gxx = arm_tool("g++")
         self.arm_strip = arm_tool("strip")
+        self.arm_readelf = arm_tool("readelf")  # for the post-build glibc-compat check
 
         e2fs_sbin = "/opt/homebrew/opt/e2fsprogs/sbin"
         e2fs_hint = ("install e2fsprogs -- macOS: `brew install e2fsprogs`; "
@@ -136,7 +146,9 @@ def build_nam_libs(tc, work):
     # conservative for numeric-heavy Eigen/DSP code; -ffast-math is standard
     # practice for audio DSP (relaxes strict IEEE754 compliance for speed,
     # no correctness risk for this use case).
-    sh([tc.arm_gxx, "-std=c++20", "-O3", "-ffast-math", "-fPIC", "-shared", "-march=armv7-a", "-mfpu=neon-vfpv4",
+    # -std=c++2a (not c++20): same standard, but the spelling GCC 9.3 also
+    # accepts -- the docker/ image's Bootlin glibc-2.31 toolchain is GCC 9.3.
+    sh([tc.arm_gxx, "-std=c++2a", "-O3", "-ffast-math", "-fPIC", "-shared", "-march=armv7-a", "-mfpu=neon-vfpv4",
         "-mfloat-abi=hard", "-DNAM_ENABLE_A2_FAST", "-DNAM_SAMPLE_FLOAT",
         "-static-libstdc++", "-static-libgcc",
         f"-I{nam_core}", f"-I{nam_core}/NAM", f"-I{nam_core}/Dependencies/eigen",
@@ -215,10 +227,52 @@ def build_launcher_script(stock_script_text, gonk_env=None):
     return script.replace(old_exec, new_exec)
 
 
+def device_glibc_version(tc, rootfs_bin):
+    """Device glibc (major, minor) read from /lib/libc.so.6's symlink target
+    (libc-X.Y.so) in the rootfs; None if undeterminable."""
+    r = sh([tc.debugfs, "-R", "stat /lib/libc.so.6", str(rootfs_bin)],
+           capture_output=True, text=True, check=False)
+    m = re.search(r'libc-(\d+)\.(\d+)\.so', r.stdout)
+    return (int(m.group(1)), int(m.group(2))) if m else None
+
+
+def so_required_glibc(tc, so_path):
+    """Highest GLIBC_x.y symbol version the .so requires, as (x, y)."""
+    r = sh([tc.arm_readelf, "-V", str(so_path)], capture_output=True, text=True, check=False)
+    vers = [(int(a), int(b)) for a, b in re.findall(r"GLIBC_(\d+)\.(\d+)", r.stdout)]
+    return max(vers) if vers else (0, 0)
+
+
+def check_glibc_compat(tc, rootfs_bin, so_paths):
+    """Refuse to package .so files that require newer glibc symbol versions than
+    the device provides -- that mismatch makes Evil fail to load the preload/hook
+    libs and hang on the boot splash. It bites any build whose ARM toolchain
+    targets too-new a glibc, e.g. Debian bookworm's crossbuild-essential-armhf
+    (glibc 2.36) against this glibc-2.32 device; docker/Dockerfile ships a
+    glibc-2.31 toolchain to avoid it, and this is the backstop."""
+    dev = device_glibc_version(tc, rootfs_bin)
+    if dev is None:
+        print("WARN  could not determine device glibc version -- skipping glibc compat check")
+        return
+    for so in so_paths:
+        need = so_required_glibc(tc, so)
+        if need > dev:
+            die(f"{Path(so).name} requires GLIBC_{need[0]}.{need[1]} but this device provides "
+                f"only up to GLIBC_{dev[0]}.{dev[1]} -- the flashed image WOULD HANG ON BOOT "
+                f"(Evil can't dlopen/preload it). Your ARM cross-toolchain targets too-new a "
+                f"glibc. Build via scripts/build_docker.sh (its image uses a glibc-2.31 "
+                f"toolchain), or point at a glibc<={dev[0]}.{dev[1]} toolchain. Current g++: {tc.arm_gxx}")
+    print(f"OK  glibc compat: both libs require <= GLIBC_{dev[0]}.{dev[1]} "
+          f"(device provides GLIBC_{dev[0]}.{dev[1]})")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("input_img", type=Path, help="stock HeadRush Pedalboard 2.7 Update.img")
+    ap.add_argument("input_img", type=Path, help="stock HeadRush Update.img")
     ap.add_argument("output_img", type=Path, help="path to write the modified Update.img")
+    ap.add_argument("--model", default=None, choices=sorted(model_targets.TARGETS),
+                    help="target model (default: auto-detect from Update.img compatible, "
+                         f"else {model_targets.DEFAULT_TARGET})")
     ap.add_argument("--keep-work-dir", action="store_true", help="don't delete the temp build directory")
     args = ap.parse_args()
 
@@ -234,6 +288,9 @@ def main():
     try:
         metadata = extract_update_img(args.input_img, work)
 
+        target, reason = model_targets.select_target(args.model, metadata.get("compatible"))
+        print(f"OK  model target: {target.name}  ({reason})")
+
         with open(work / "rootfs.bin", "wb") as f:
             sh([tc.xz, "-d", "-k", "-T0", "-c", str(work / "rootfs_orig.xz")], stdout=f)
 
@@ -243,11 +300,13 @@ def main():
         sh([tc.debugfs, "-R", f"dump /usr/Evil/Scripts/evil {work / 'evil_script_orig.sh'}", str(work / "rootfs.bin")])
 
         # Anxiety OD ("process()" vtable slot 8) hijack via patch_gonkulator.py:
-        # repoints AnxietyOD's real, live engine vtable (0x1839044, cross-
-        # confirmed via both RTTI xref-chasing and ctor/clone disassembly --
-        # see patch_gonkulator.py's docstring) at an injected trampoline
-        # running NAM inference, falling back to the original process()
-        # (0x3260e0) when no hook is installed. patch_namloader.py
+        # repoints AnxietyOD's real, live engine vtable at an injected trampoline
+        # running NAM inference, falling back to the original process() when no
+        # hook is installed. The exact addresses are per-model (see
+        # scripts/model_targets.py; Pedalboard 2.7 vtable 0x1839044 / process
+        # 0x3260e0, MX5 2.7 vtable 0x17ee460 / process 0x302ed0 -- both cross-
+        # confirmed via RTTI xref-chasing and ctor/clone disassembly, see
+        # patch_gonkulator.py's docstring). patch_namloader.py
         # (unreachable additive design, also live-patches the
         # ModFac_construct dispatch hot path) and patch_modfac_spy.py (needs
         # a code cave beyond ARM B/BL's +-32MB reach of its target) are NOT
@@ -260,15 +319,23 @@ def main():
 
         evil_hijacked = work / "Evil.hijacked"
         sh([sys.executable, str(REPO_ROOT / "patch" / "patch_gonkulator.py"),
-            str(work / "Evil"), str(tramp_bin), str(evil_hijacked)])
+            str(work / "Evil"), str(tramp_bin), str(evil_hijacked),
+            "--engine-vtable", hex(target.engine_vtable_vaddr),
+            "--orig-fn", hex(target.orig_process_fn)])
         gonk_env = json.loads((work / "Evil.hijacked.json").read_text())
 
         # patch_qml_labels.py: targets Anxiety OD's own raw QRC-embedded QML
         # source blob (found via its unique propertyPath string, not
         # proximity guessing -- see its docstring). Refuses on mismatch.
+        # Skipped for models with no per-pedal QML relabel target (e.g. MX5,
+        # whose knob labels come from a shared string pool -- see model_targets).
         evil_labeled = work / "Evil.labeled"
-        sh([sys.executable, str(REPO_ROOT / "patch" / "patch_qml_labels.py"),
-            str(evil_hijacked), str(evil_labeled)])
+        if target.qml_renames:
+            sh([sys.executable, str(REPO_ROOT / "patch" / "patch_qml_labels.py"),
+                str(evil_hijacked), str(evil_labeled), "--model", target.name])
+        else:
+            print(f"    (QML knob relabel skipped for {target.name} -- no per-pedal target)")
+            shutil.copyfile(evil_hijacked, evil_labeled)
 
         # patch_pedal_title.py DISABLED: v43 real-hardware test showed
         # renaming this ASCII table entry breaks the pedal entirely (stuck
@@ -283,6 +350,7 @@ def main():
         shutil.copyfile(evil_labeled, evil_final)
 
         hook_so, preload_so = build_nam_libs(tc, work)
+        check_glibc_compat(tc, work / "rootfs.bin", [hook_so, preload_so])
 
         launcher = build_launcher_script((work / "evil_script_orig.sh").read_text(), gonk_env=gonk_env)
         (work / "evil_script.sh").write_text(launcher)
