@@ -103,14 +103,23 @@ This patches a COPY of Evil (never the original). Sanity-checks the vtable
 slot currently holds 0x2e7910, and the code cave is genuinely zero, before
 touching anything.
 """
+import argparse
 import json
 import struct
 import sys
 
 PAGE = 0x1000
 
-GONK_VTABLE_SLOT_FILE_OFFSET = 0x1839064 - 0x8000  # AnxietyOD engine vtable (0x1839044) slot 8
-EXPECTED_ORIG_FN = 0x3260e0
+# The two values that vary per `Evil` are CLI args (--engine-vtable, --orig-fn);
+# their defaults are the HeadRush Pedalboard 2.7 values, so a bare invocation is
+# unchanged, and build_update_img.py passes per-model overrides (see
+# scripts/model_targets.py). PROCESS_SLOT and VADDR_BASE are the same for every
+# supported Evil (same DSPModule<AnxietyOD,...> class / ELF layout), so they're
+# fixed constants here rather than per-model.
+DEFAULT_ENGINE_VTABLE = 0x1839044  # AnxietyOD engine object's real vtable address-point
+DEFAULT_ORIG_FN = 0x3260e0         # value the slot holds pre-patch (real process())
+PROCESS_SLOT = 8                   # process() index in the engine vtable
+VADDR_BASE = 0x8000                # code segment p_vaddr - p_offset (vaddr -> file offset)
 TRAMP_CODE_LEN = 28  # trampoline_gonk.S bytes 0:28 -- instructions + the two literals
 
 
@@ -191,12 +200,25 @@ def find_reclaimable_gap(data, phdrs, code_seg, need_len):
     return gap_size
 
 
-def main():
-    if len(sys.argv) != 4:
-        print(f"usage: {sys.argv[0]} <Evil-in> <trampoline_gonk.bin> <Evil-out>", file=sys.stderr)
-        sys.exit(1)
+def auto_int(x):
+    return int(x, 0)
 
-    in_path, tramp_path, out_path = sys.argv[1:4]
+
+def main():
+    ap = argparse.ArgumentParser(description="repoint Anxiety OD engine process() vtable slot")
+    ap.add_argument("in_path", help="stock Evil binary (never modified)")
+    ap.add_argument("tramp_path", help="assembled trampoline_gonk.bin (32 bytes)")
+    ap.add_argument("out_path", help="patched Evil to write")
+    ap.add_argument("--engine-vtable", type=auto_int, default=DEFAULT_ENGINE_VTABLE,
+                    help="AnxietyOD engine vtable address-point (default: Pedalboard 2.7)")
+    ap.add_argument("--orig-fn", type=auto_int, default=DEFAULT_ORIG_FN,
+                    help="value the slot must already hold (real process(); fallback + sanity guard)")
+    args = ap.parse_args()
+
+    in_path, tramp_path, out_path = args.in_path, args.tramp_path, args.out_path
+    slot_vaddr = args.engine_vtable + PROCESS_SLOT * 4
+    gonk_vtable_slot_file_offset = slot_vaddr - VADDR_BASE
+    expected_orig_fn = args.orig_fn
 
     with open(in_path, "rb") as f:
         data = bytearray(f.read())
@@ -211,11 +233,11 @@ def main():
 
     phdrs = parse_phdrs(data, ehdr)
 
-    orig_val = struct.unpack_from("<I", data, GONK_VTABLE_SLOT_FILE_OFFSET)[0]
-    if orig_val != EXPECTED_ORIG_FN:
-        print(f"REFUSING: AnxietyOD vtable slot @ 0x{GONK_VTABLE_SLOT_FILE_OFFSET:x} "
-              f"holds 0x{orig_val:x}, expected 0x{EXPECTED_ORIG_FN:x}. Wrong binary / "
-              f"already patched / stale offsets -- re-verify before proceeding.",
+    orig_val = struct.unpack_from("<I", data, gonk_vtable_slot_file_offset)[0]
+    if orig_val != expected_orig_fn:
+        print(f"REFUSING: AnxietyOD vtable slot @ 0x{gonk_vtable_slot_file_offset:x} "
+              f"holds 0x{orig_val:x}, expected 0x{expected_orig_fn:x}. Wrong binary / "
+              f"wrong --model / already patched / stale offsets -- re-verify before proceeding.",
               file=sys.stderr)
         sys.exit(2)
 
@@ -249,7 +271,7 @@ def main():
     new_data_memsz = data_seg["p_memsz"] + 4
 
     struct.pack_into("<I", tramp, 20, hook_slot_addr)
-    struct.pack_into("<I", tramp, 24, EXPECTED_ORIG_FN)
+    struct.pack_into("<I", tramp, 24, expected_orig_fn)
 
     data[cave_off:cave_off + TRAMP_CODE_LEN] = tramp[0:TRAMP_CODE_LEN]
 
@@ -260,7 +282,7 @@ def main():
     data_phdr_off = ehdr["e_phoff"] + data_seg_index * ehdr["e_phentsize"] + PHDR_OFF_MEMSZ
     struct.pack_into("<I", data, data_phdr_off, new_data_memsz)
 
-    struct.pack_into("<I", data, GONK_VTABLE_SLOT_FILE_OFFSET, tramp_base_vaddr)
+    struct.pack_into("<I", data, gonk_vtable_slot_file_offset, tramp_base_vaddr)
 
     with open(out_path, "wb") as f:
         f.write(data)
@@ -272,7 +294,7 @@ def main():
     print(f"    trampoline @ 0x{tramp_base_vaddr:x}  (AnxietyOD engine vtable slot 8 now points here)")
     print(f"    data segment (index {data_seg_index}) memsz grown 0x{data_seg['p_memsz']:x} -> 0x{new_data_memsz:x}")
     print(f"    hook_slot  @ 0x{hook_slot_addr:x}  <-- pass to nam_preload as NAM_HOOK_SLOT_GONK_ADDR")
-    print(f"    fallback (orig process()) still reachable @ 0x{EXPECTED_ORIG_FN:x}")
+    print(f"    fallback (orig process()) still reachable @ 0x{expected_orig_fn:x}")
     print(f"    no new PT_LOAD segment, no e_phoff/e_phnum change, file size unchanged "
           f"(0x{len(data):x} bytes)")
 

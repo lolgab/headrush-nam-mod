@@ -51,14 +51,18 @@ docstring for the knob-to-offset mapping derivation):
 
 Hi-Lo is deliberately left alone -- not wired to anything functional yet.
 """
+import argparse
 import sys
+from pathlib import Path
 
-# (file offset of text right after the opening quote, expected original, new text)
-RENAMES = [
-    (0x1b7beba, "Drive", "Model"),
-    (0x1b7bf1b, "Tone", "Inp "),
-    (0x1b7be57, "Level", "Outp "),
-]
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import model_targets  # noqa: E402
+
+# Pedalboard 2.7 renames (default). Other models pull their own from
+# scripts/model_targets.py via --model; a model with qml_renames=None (e.g. MX5,
+# whose knob labels come from a shared string pool) has no per-pedal target and
+# should not be run through this script at all.
+RENAMES = model_targets.PEDALBOARD_2_7.qml_renames
 
 
 def patch_one(data, off, expected, new_text):
@@ -76,16 +80,27 @@ def patch_one(data, off, expected, new_text):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print(f"usage: {sys.argv[0]} <Evil-in> <Evil-out>", file=sys.stderr)
-        sys.exit(1)
+    ap = argparse.ArgumentParser(description="rename Anxiety OD on-screen knob labels")
+    ap.add_argument("in_path", help="Evil binary in")
+    ap.add_argument("out_path", help="Evil binary out")
+    ap.add_argument("--model", default=None,
+                    help="model target whose qml_renames to apply (default: Pedalboard 2.7)")
+    args = ap.parse_args()
+    in_path, out_path = args.in_path, args.out_path
 
-    in_path, out_path = sys.argv[1:3]
+    renames = RENAMES
+    if args.model:
+        target = model_targets.TARGETS[args.model]
+        renames = target.qml_renames
+        if not renames:
+            print(f"REFUSING: model {args.model!r} has no QML knob relabel defined "
+                  f"(qml_renames is None) -- do not run this script for it.", file=sys.stderr)
+            sys.exit(2)
 
     with open(in_path, "rb") as f:
         data = bytearray(f.read())
 
-    for off, expected, new_text in RENAMES:
+    for off, expected, new_text in renames:
         patch_one(data, off, expected, new_text)
 
     with open(out_path, "wb") as f:
