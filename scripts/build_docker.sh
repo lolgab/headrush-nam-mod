@@ -6,7 +6,9 @@
 # compat is version-sensitive, so this pins exact versions instead of
 # depending on whatever the host distro happens to ship.
 #
-# Usage: ./scripts/build_docker.sh [--rebuild] <input Update.img> <output Update.img>
+# Usage: ./scripts/build_docker.sh [--rebuild] <input Update.img> <output Update.img> [build_update_img.py args...]
+# Any args after the output path are passed straight to build_update_img.py
+# inside the container, e.g. `--model mx5-2.7`.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,18 +18,23 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 
 command -v docker >/dev/null 2>&1 || die "docker not found in PATH -- install Docker Desktop (macOS/Windows) or docker-ce (Linux)."
 
-REBUILD=0
+NOCACHE=""
 if [ "${1:-}" = "--rebuild" ]; then
-    REBUILD=1
+    NOCACHE="--no-cache"
     shift
 fi
 
-[ $# -eq 2 ] || die "usage: $0 [--rebuild] <input Update.img> <output Update.img>"
+[ $# -ge 2 ] || die "usage: $0 [--rebuild] <input Update.img> <output Update.img> [build_update_img.py args...]"
 
-if [ "$REBUILD" = 1 ] || ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    echo "Building $IMAGE docker image..."
-    docker build -t "$IMAGE" -f "$DIR/docker/Dockerfile" "$DIR"
-fi
+# Always run docker build (not just when the image is missing). Docker's layer
+# cache makes this a near-instant no-op when docker/Dockerfile is unchanged, and
+# -- crucially -- it rebuilds when the Dockerfile HAS changed. The old "skip if
+# the image already exists" logic meant a pulled Dockerfile change (e.g. the
+# glibc-2.31 toolchain swap) was silently ignored in favor of a stale cached
+# image, so you could keep building boot-hanging firmware without knowing.
+# `--rebuild` forces a full, cache-ignoring rebuild.
+echo "Building $IMAGE docker image (cached layers reused if docker/Dockerfile is unchanged)..."
+docker build $NOCACHE -t "$IMAGE" -f "$DIR/docker/Dockerfile" "$DIR"
 
 if [ ! -e "$DIR/nam_core/CMakeLists.txt" ]; then
     echo "nam_core submodule not initialized -- fetching it..."
@@ -36,6 +43,7 @@ fi
 
 in_path="$1"
 out_path="$2"
+shift 2  # remaining args ("$@") are forwarded to build_update_img.py below
 [ -f "$in_path" ] || die "$in_path not found"
 
 in_dir="$(cd "$(dirname "$in_path")" && pwd)"
@@ -50,4 +58,4 @@ docker run --rm \
     -v "$out_dir":/out \
     -w /repo \
     "$IMAGE" \
-    python3 scripts/build_update_img.py "/in/$in_name" "/out/$out_name"
+    python3 scripts/build_update_img.py "/in/$in_name" "/out/$out_name" "$@"
