@@ -31,6 +31,57 @@ HeadRush Pedalboard 2.7 Firmware Updater (NAM mod).app   <- run this to flash
 HeadRush Pedalboard 2.7 Firmware Updater.app             <- unmodified, keep for recovery
 ```
 
+### Quick start (Linux)
+
+Same idea, using Docker for the ARM cross-toolchain/e2fsprogs/u-boot-tools
+instead of distro packages (these tools' on-disk-format compatibility is
+version-sensitive enough that pinning them in an image beats hoping your
+distro's versions behave):
+
+```sh
+git clone --recurse-submodules <this-repo-url>
+cd headrush-nam-mod
+# get Update.img out of the official Linux/generic updater's payload yourself,
+# then:
+./scripts/build_docker.sh /path/to/stock/Update.img Update_nam.img
+```
+
+Requires Docker (`docker info` must work). See "Docker-based build" under
+For developers below for what this does; flashing steps are the same as the
+manual macOS flow further down.
+
+### Quick start (Windows)
+
+Windows itself can't run the Linux/Docker toolchain directly, but WSL2 can —
+and Docker Desktop's WSL2 backend makes `docker` available inside your WSL
+distro with no extra setup
+([docs](https://docs.docker.com/desktop/wsl/)). From a WSL2 terminal (e.g.
+Ubuntu):
+
+```sh
+sudo apt install p7zip-full unzip git curl   # if not already present
+git clone --recurse-submodules <this-repo-url>
+cd headrush-nam-mod
+./scripts/quickstart_windows.sh
+```
+
+This checks required tools, downloads the official HeadRush Pedalboard 2.7
+**Windows** updater `.exe`, builds the NAM-modded `Update.img` via Docker,
+and repacks a new installer `.exe` (see "Patching the Windows updater .exe"
+under For developers for how that repacking works). It leaves two files in
+the current directory:
+
+```
+HeadRush Pedalboard 2.7 Firmware Updater - Win (NAM mod).exe   <- copy to Windows, run this to flash
+HeadRush Pedalboard 2.7 Firmware Updater - Win.exe             <- unmodified, keep for recovery
+```
+
+If you built from WSL, copy the patched `.exe` to the Windows side (it's
+already on your Windows filesystem if your WSL working directory is under
+`/mnt/c/...`) and run it there like the official updater. It's unsigned
+(see that section for why) — Windows SmartScreen may warn about an
+unrecognized publisher, which is expected for any unofficial build.
+
 **Flashing:**
 
 1. Put your device in firmware-update mode. See
@@ -177,11 +228,38 @@ brew install armv7-unknown-linux-gnueabihf
 finds them under `/opt/homebrew/opt/...` automatically, no need to modify
 your `PATH`.)
 
-Only tested on macOS (Apple Silicon). Should work on Linux with the
-equivalent packages, but the toolchain lookup in
-`scripts/build_update_img.py`'s `Toolchain` class currently only checks the
-Homebrew keg paths and bare `PATH` — patch that class if your distro puts
-things elsewhere.
+On Debian/Ubuntu (including WSL2), the equivalent is:
+
+```sh
+sudo apt install e2fsprogs u-boot-tools device-tree-compiler xz-utils crossbuild-essential-armhf
+```
+
+`scripts/build_update_img.py`'s `Toolchain` class checks both the Homebrew
+keg paths and the Debian/Ubuntu `arm-linux-gnueabihf-*` cross-toolchain
+naming, so either works with plain `./build.sh`. If your distro packages
+these differently, either adjust `PATH`/symlinks to match one of the two
+naming schemes, or skip all of this and use the Docker build below, which
+pins exact versions instead of depending on the host distro at all.
+
+### Docker-based build (recommended for Linux and Windows/WSL)
+
+`debugfs`/`mkimage`'s on-disk-format compatibility is version-sensitive
+enough that pinning exact tool versions in an image beats hoping a given
+host distro's packages behave. `docker/Dockerfile` builds a Debian image
+with the exact toolchain/e2fsprogs/u-boot-tools/dtc versions this repo is
+tested against; `scripts/build_docker.sh` builds that image (once, cached
+after) and runs the same `build_update_img.py` inside it:
+
+```sh
+./scripts/build_docker.sh /path/to/stock/Update.img /path/to/output/Update_nam.img
+```
+
+Pass `--rebuild` as the first argument to force rebuilding the image (e.g.
+after pulling changes to `docker/Dockerfile`). This is exactly what
+`scripts/quickstart_windows.sh` uses under the hood, and works identically
+on macOS, Linux, and Windows/WSL2 (anywhere Docker Desktop or a Linux docker
+engine is available) — same image, same tool versions, same output,
+regardless of host OS.
 
 ### Setup
 
@@ -232,13 +310,57 @@ firmware via the footswitch recovery mode (see step 4 above, and
 [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a walkthrough).
 Proceed at your own risk.
 
+### Patching the Windows updater .exe
+
+The Windows updater isn't a `.app` bundle with `Update.img` sitting in a
+resources folder — it's a plain **7-Zip self-extracting installer**: a PE
+stub, a small text config block (standard 7-Zip SFX syntax:
+`;!@Install@!UTF-8! ... RunProgram="FirmwareUpdater.exe" ... ;!@InstallEnd@!`),
+then a normal 7z archive holding `Background.png`, `Config.json`,
+`Update.img`, `FirmwareUpdater.exe`, and `libusb-1.0.dll` as flat files (no
+subfolders). `Config.json` (device-detection UI strings) has no checksum of
+`Update.img`, so `scripts/repack_windows_updater.py` just swaps that one
+entry and rebuilds the archive:
+
+```sh
+python3 scripts/repack_windows_updater.py stock_updater.exe Update_nam.img output.exe
+```
+
+(`scripts/quickstart_windows.sh` runs this for you automatically after
+building `Update_nam.img` via Docker.) One wrinkle: the stock `.exe` is
+Authenticode-signed, with the signature appended as a certificate block
+*after* the 7z archive, referenced by an absolute file offset baked into the
+PE header's Security Directory entry. Since editing the archive changes the
+file's total length, that stored offset would otherwise point into the
+middle of the new archive instead of a valid certificate — and 7-Zip's own
+PE parser refuses to recognize the whole file as an archive at all when it
+can't read a valid certificate there (not just skip it). The script zeros
+that directory entry, since there's no way to produce a signature that
+verifies over modified bytes anyway; the repacked `.exe` is unsigned, same
+as every other artifact this repo produces. Round-trip verified: `7z t`
+integrity-checks the output, then re-extracts it and confirms
+`Background.png`/`Config.json`/`FirmwareUpdater.exe`/`libusb-1.0.dll` are
+byte-exact to stock and `Update.img` matches the patched input exactly.
+
 ### Repo layout
 
 - `scripts/quickstart_mac.sh` — one-command macOS path: checks tools,
   downloads the stock Mac updater, runs the build, and patches a copy of
   the updater app in place. See Quick start above.
+- `scripts/quickstart_windows.sh` — one-command Windows path (run from
+  Linux or WSL2): checks tools, downloads the stock Windows updater `.exe`,
+  builds via Docker, and repacks a patched `.exe`. See Quick start above.
+- `docker/Dockerfile` — pinned Debian image with the ARM cross-toolchain,
+  e2fsprogs, u-boot-tools, and device-tree-compiler this repo is tested
+  against. See "Docker-based build" above.
+- `scripts/build_docker.sh` — builds/caches the docker image and runs
+  `build_update_img.py` inside it; used directly on Linux and by
+  `quickstart_windows.sh`.
 - `scripts/build_update_img.py` — the actual build pipeline (extraction,
   patching, cross-compilation, repacking, verification).
+- `scripts/repack_windows_updater.py` — swaps `Update.img` inside the
+  Windows updater `.exe`'s embedded 7z archive for a patched one. See
+  "Patching the Windows updater .exe" above.
 - `scripts/fit_image.py` — minimal FDT/FIT image reader used to pull the
   splash/recoverysplash/rootfs blobs and metadata out of the input
   `Update.img`, and to regenerate the `.its` source for `mkimage`.

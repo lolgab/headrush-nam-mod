@@ -57,21 +57,43 @@ def find_tool(candidates, hint):
 
 
 class Toolchain:
+    """Locates build tools across macOS (Homebrew), Linux (distro packages),
+    and the docker/ image (Debian's crossbuild-essential-armhf) alike --
+    see scripts/build_docker.sh, the recommended way to get all of these at
+    once regardless of host OS."""
+
     def __init__(self):
-        arm_bin = "/opt/homebrew/opt/armv7-unknown-linux-gnueabihf/bin"
-        prefix = "armv7-unknown-linux-gnueabihf-"
-        self.arm_as = find_tool([f"{arm_bin}/{prefix}as", f"{prefix}as"],
-                                 "install via: brew install messense/macos-cross-toolchains/armv7-unknown-linux-gnueabihf")
-        self.arm_objcopy = find_tool([f"{arm_bin}/{prefix}objcopy", f"{prefix}objcopy"], "same tap as above")
-        self.arm_gxx = find_tool([f"{arm_bin}/{prefix}g++", f"{prefix}g++"], "same tap as above")
-        self.arm_strip = find_tool([f"{arm_bin}/{prefix}strip", f"{prefix}strip"], "same tap as above")
+        mac_bin = "/opt/homebrew/opt/armv7-unknown-linux-gnueabihf/bin"
+        mac_prefix = "armv7-unknown-linux-gnueabihf-"
+        linux_prefix = "arm-linux-gnueabihf-"  # Debian/Ubuntu crossbuild-essential-armhf / gcc-arm-linux-gnueabihf
+
+        def arm_tool(name):
+            return find_tool(
+                [f"{mac_bin}/{mac_prefix}{name}", f"{linux_prefix}{name}", f"{mac_prefix}{name}"],
+                "install an ARM32 hard-float cross toolchain -- macOS: "
+                "`brew tap messense/macos-cross-toolchains && brew install armv7-unknown-linux-gnueabihf`; "
+                "Debian/Ubuntu (incl. WSL): `apt install crossbuild-essential-armhf`; "
+                "or skip all of this and use scripts/build_docker.sh instead.")
+
+        self.arm_as = arm_tool("as")
+        self.arm_objcopy = arm_tool("objcopy")
+        self.arm_gxx = arm_tool("g++")
+        self.arm_strip = arm_tool("strip")
 
         e2fs_sbin = "/opt/homebrew/opt/e2fsprogs/sbin"
-        self.debugfs = find_tool([f"{e2fs_sbin}/debugfs", "debugfs"], "install via: brew install e2fsprogs")
-        self.e2fsck = find_tool([f"{e2fs_sbin}/e2fsck", "e2fsck"], "install via: brew install e2fsprogs")
+        e2fs_hint = ("install e2fsprogs -- macOS: `brew install e2fsprogs`; "
+                     "Debian/Ubuntu (incl. WSL): `apt install e2fsprogs`; "
+                     "or use scripts/build_docker.sh.")
+        self.debugfs = find_tool([f"{e2fs_sbin}/debugfs", "/sbin/debugfs", "debugfs"], e2fs_hint)
+        self.e2fsck = find_tool([f"{e2fs_sbin}/e2fsck", "/sbin/e2fsck", "e2fsck"], e2fs_hint)
 
-        self.mkimage = find_tool(["mkimage"], "install via: brew install u-boot-tools")
-        self.xz = find_tool(["xz"], "should be preinstalled; install via: brew install xz")
+        self.mkimage = find_tool(["mkimage"],
+                                  "install u-boot-tools -- macOS: `brew install u-boot-tools`; "
+                                  "Debian/Ubuntu (incl. WSL): `apt install u-boot-tools`; "
+                                  "or use scripts/build_docker.sh.")
+        self.xz = find_tool(["xz"],
+                             "should be preinstalled; macOS: `brew install xz`; "
+                             "Debian/Ubuntu (incl. WSL): `apt install xz-utils`.")
 
 
 def extract_update_img(img_path, work):
