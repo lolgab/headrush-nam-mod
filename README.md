@@ -1,11 +1,11 @@
-# HeadRush Pedalboard 2.7 — Neural Amp Modeler (NAM) mod
+# HeadRush Pedalboard & MX5 (2.7) — Neural Amp Modeler (NAM) mod
 
-Reverse-engineered firmware mod for the HeadRush Pedalboard, adding
+Reverse-engineered firmware mod for the HeadRush Pedalboard and MX5, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
 **Status**: a real, working NAM pedal today, via a hijacked pedal slot,
-confirmed on real hardware.
+confirmed on real hardware — see [Supported models](#supported-models).
 
 ## For users
 
@@ -30,6 +30,11 @@ directory:
 HeadRush Pedalboard 2.7 Firmware Updater (NAM mod).app   <- run this to flash
 HeadRush Pedalboard 2.7 Firmware Updater.app             <- unmodified, keep for recovery
 ```
+
+> This one-command macOS path currently fetches the **Pedalboard** updater only.
+> For the **MX5** on macOS, extract `Update.img` from the MX5 Mac updater
+> yourself and run `./build.sh` (see [Usage](#usage)) — it auto-detects the
+> model. (The Linux/Windows quickstarts below take `--model mx5-2.7`.)
 
 ### Quick start (Linux)
 
@@ -111,21 +116,28 @@ on the device, add the **Anxiety OD** pedal.
 | **TONE** | input trim |
 | **LEVEL** | output trim |
 
+On the **Pedalboard** the on-screen labels are relabeled to match (Model / Inp /
+Outp); on the **MX5** they keep their original **Drive / Tone / Level** names but
+do exactly the same thing (see [Supported models](#supported-models)).
+
 ## For developers / maintainers
 
 ### What this does
 
-Takes a stock HeadRush Pedalboard **2.7** firmware update file (`Update.img`)
-and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
-`process()` function, replacing its overdrive DSP with NAM inference.
+Takes a stock HeadRush Pedalboard or MX5 **2.7** firmware update file
+(`Update.img`) and produces a modified one that hijacks the **Anxiety OD (v1)**
+pedal's `process()` function, replacing its overdrive DSP with NAM inference.
+The model is auto-detected (see [Supported models](#supported-models)).
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
 on every instance. It's fine since there is Anxiety OS V2 that is still available.
 
 #### Knob implementation
 
-Anxiety OD's on-screen labels are patched to match what they now do (see
-"Using it" under For users above for what each knob does day to day):
+Anxiety OD's on-screen labels are patched (on the **Pedalboard** only — the MX5
+keeps its stock labels, see [Supported models](#supported-models)) to match what
+they now do (see "Using it" under For users above for what each knob does day to
+day):
 
 | Original | Function |
 |---|---|
@@ -339,17 +351,18 @@ Pass `--keep-work-dir` to leave the intermediate build directory in place
    app expects to find it (varies by updater version — check its
    `Contents/Resources/` or equivalent).
 3. Run the updater with the device in firmware-update mode.
-4. **Recovery, if a flash goes wrong**: hold footswitches 1 and 8
-   (leftmost, counting left to right) while powering on to force
-   firmware-update/recovery mode, then reflash the original `Update.img`.
+4. **Recovery, if a flash goes wrong**: force firmware-update/recovery mode by
+   holding, while powering on, footswitches **1 and 8** on the Pedalboard
+   (leftmost, counting left to right) or the **first two** footswitches on the
+   MX5, then reflash the original `Update.img`.
 
 The FIT image format has no cryptographic signature check on the rootfs
 itself (only SHA1 integrity hashes, which `mkimage` recomputes correctly for
-the modified data). Tested on a real HeadRush Pedalboard 2.7 device: NAM
-inference works, and the device can be safely recovered back to stock
+the modified data). Tested on real HeadRush Pedalboard 2.7 and MX5 2.7 devices:
+NAM inference works, and the device can be safely recovered back to stock
 firmware via the footswitch recovery mode (see step 4 above, and
-[this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a walkthrough).
-Proceed at your own risk.
+[this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a Pedalboard
+walkthrough). Proceed at your own risk.
 
 ### Patching the Windows updater .exe
 
@@ -447,6 +460,6 @@ The patch scripts and glue code in this repo are licensed under the
 [GNU GPLv3](LICENSE). `nam_core/` is MIT-licensed by its own upstream
 project (Steven Atkinson).
 
-This project reverse-engineers and modifies HeadRush Pedalboard firmware,
-which is not affiliated with or endorsed by inMusic/HeadRush. Use at your
-own risk; modifying your device's firmware may void its warranty.
+This project reverse-engineers and modifies HeadRush Pedalboard and MX5
+firmware, which is not affiliated with or endorsed by inMusic/HeadRush. Use at
+your own risk; modifying your device's firmware may void its warranty.
