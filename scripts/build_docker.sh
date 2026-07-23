@@ -8,7 +8,7 @@
 #
 # Usage: ./scripts/build_docker.sh [--rebuild] <input Update.img> <output Update.img> [build_update_img.py args...]
 # Any args after the output path are passed straight to build_update_img.py
-# inside the container, e.g. `--model mx5-2.7`.
+# inside the container, e.g. `--model mx5`.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -36,10 +36,7 @@ fi
 echo "Building $IMAGE docker image (cached layers reused if docker/Dockerfile is unchanged)..."
 docker build $NOCACHE -t "$IMAGE" -f "$DIR/docker/Dockerfile" "$DIR"
 
-if [ ! -e "$DIR/nam_core/CMakeLists.txt" ]; then
-    echo "nam_core submodule not initialized -- fetching it..."
-    git -C "$DIR" submodule update --init --recursive
-fi
+"$DIR/scripts/fetch_nam_core.sh"
 
 in_path="$1"
 out_path="$2"

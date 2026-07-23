@@ -7,3 +7,6 @@
 build/
 __pycache__/
 *.pyc
+
+# fetched by scripts/fetch_nam_core.sh (tarball, not a git submodule)
+/nam_core/

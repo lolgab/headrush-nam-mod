@@ -14,13 +14,31 @@
 # Run the patched .app like the original updater to flash your device.
 set -euo pipefail
 
-FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/Pedalboard%20v2.7/MacOS%20Updater/HeadRush%20Pedalboard%202.7%20Firmware%20Updater%20-%20Mac.zip"
-
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 [ "$(uname)" = "Darwin" ] || die "this script is macOS-only (uses ditto/codesign)."
+
+# ---- model selection (which device's updater to fetch + patch) -------------
+MODEL="pedalboard"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --model)   MODEL="${2:-}"; shift 2 ;;
+        --model=*) MODEL="${1#*=}"; shift ;;
+        -h|--help) echo "usage: $(basename "$0") [--model pedalboard|mx5]"; exit 0 ;;
+        *)         die "unknown argument: $1 (usage: $(basename "$0") [--model pedalboard|mx5])" ;;
+    esac
+done
+
+case "$MODEL" in
+    pedalboard)
+        FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/Pedalboard%20v2.7/MacOS%20Updater/HeadRush%20Pedalboard%202.7%20Firmware%20Updater%20-%20Mac.zip" ;;
+    mx5)
+        FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/MX5%20v2.7/MacOS%20Updater/HeadRush%20MX5%202.7%20Firmware%20Updater%20-%20Mac.zip" ;;
+    *)
+        die "unknown --model '$MODEL' (known: pedalboard, mx5)" ;;
+esac
 
 # ---- 1. tool check ---------------------------------------------------------
 missing_brew_cmds=()
@@ -57,16 +75,13 @@ if [ ${#missing_brew_cmds[@]} -gt 0 ]; then
     exit 1
 fi
 
-if [ ! -e "$DIR/nam_core/CMakeLists.txt" ]; then
-    echo "nam_core submodule not initialized -- fetching it..."
-    git -C "$DIR" submodule update --init --recursive
-fi
+"$DIR/scripts/fetch_nam_core.sh"
 
 # ---- 2. download + extract the stock updater -------------------------------
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-echo "Downloading stock HeadRush Pedalboard 2.7 Mac updater..."
+echo "Downloading stock HeadRush Mac updater ($MODEL)..."
 curl -fL -o "$WORK/updater.zip" "$FW_URL"
 
 echo "Extracting..."

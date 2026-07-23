@@ -9,32 +9,44 @@ confirmed on real hardware — see [Supported models](#supported-models).
 
 ## For users
 
+### One-line install
+
+No `git clone` needed — this downloads the repo as a plain tarball, detects
+your OS, and runs the matching quickstart below for you:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lolgab/headrush-nam-mod/main/install.sh | bash
+# force the MX5 instead of the default Pedalboard:
+curl -fsSL https://raw.githubusercontent.com/lolgab/headrush-nam-mod/main/install.sh | bash -s -- --model mx5
+```
+
+Works on macOS, native Linux, and WSL2 (picks the Windows `.exe`-producing
+path automatically under WSL). See the per-OS sections below for what each
+path actually does, or if you'd rather `git clone` and run a script directly.
+
 ### Quick start (macOS)
 
 Turns the stock HeadRush Pedalboard 2.7 firmware updater into a NAM-modded
 one, in one command:
 
 ```sh
-git clone --recurse-submodules <this-repo-url>
+git clone <this-repo-url>
 cd headrush-nam-mod
-./scripts/quickstart_mac.sh
+./scripts/quickstart_mac.sh                 # HeadRush Pedalboard (default)
+./scripts/quickstart_mac.sh --model mx5     # HeadRush MX5
 ```
 
 This checks you have the required build tools installed (prints the exact
 `brew install` commands and stops if anything's missing — it never installs
-anything itself), downloads the official HeadRush Pedalboard 2.7 Mac
-updater, patches it with the NAM mod, and drops two apps in your current
-directory:
+anything itself), downloads the official HeadRush Mac updater for the
+selected `--model` (default `pedalboard`; also `mx5` — see
+[Supported models](#supported-models)), patches it with the NAM mod, and
+drops two apps in your current directory, e.g. for the default Pedalboard:
 
 ```
 HeadRush Pedalboard 2.7 Firmware Updater (NAM mod).app   <- run this to flash
 HeadRush Pedalboard 2.7 Firmware Updater.app             <- unmodified, keep for recovery
 ```
-
-> This one-command macOS path currently fetches the **Pedalboard** updater only.
-> For the **MX5** on macOS, extract `Update.img` from the MX5 Mac updater
-> yourself and run `./build.sh` (see [Usage](#usage)) — it auto-detects the
-> model. (The Linux/Windows quickstarts below take `--model mx5-2.7`.)
 
 ### Quick start (Linux)
 
@@ -44,16 +56,24 @@ version-sensitive enough that pinning them in an image beats hoping your
 distro's versions behave):
 
 ```sh
-git clone --recurse-submodules <this-repo-url>
+git clone <this-repo-url>
 cd headrush-nam-mod
-# get Update.img out of the official Linux/generic updater's payload yourself,
-# then:
-./scripts/build_docker.sh /path/to/stock/Update.img Update_nam.img
+./scripts/quickstart_linux.sh                 # HeadRush Pedalboard (default)
+./scripts/quickstart_linux.sh --model mx5     # HeadRush MX5
 ```
+
+This checks required tools (docker, 7z, unzip, curl), downloads the
+official HeadRush **Windows** updater for the selected `--model` (it's just a
+7z self-extracting archive — no Windows needed to unpack it), pulls out its
+embedded `Update.img`, and builds the NAM-modded version via Docker. It
+leaves `Update_nam.img` (flash this) and a stock `Update.img` (keep for
+recovery) in the current directory.
 
 Requires Docker (`docker info` must work). See "Docker-based build" under
 For developers below for what this does; flashing steps are the same as the
-manual macOS flow further down.
+manual macOS flow further down. (Prefer to build straight from your own
+`Update.img` instead of fetching HeadRush's Windows updater? Use
+`./scripts/build_docker.sh /path/to/stock/Update.img Update_nam.img` directly.)
 
 ### Quick start (Windows)
 
@@ -65,14 +85,14 @@ Ubuntu):
 
 ```sh
 sudo apt install p7zip-full unzip git curl   # if not already present
-git clone --recurse-submodules <this-repo-url>
+git clone <this-repo-url>
 cd headrush-nam-mod
-./scripts/quickstart_windows.sh                 # HeadRush Pedalboard 2.7 (default)
-./scripts/quickstart_windows.sh --model mx5-2.7 # HeadRush MX5 2.7
+./scripts/quickstart_windows.sh                 # HeadRush Pedalboard (default)
+./scripts/quickstart_windows.sh --model mx5     # HeadRush MX5
 ```
 
 This checks required tools, downloads the official HeadRush **Windows** updater
-`.exe` for the selected `--model` (default `pedalboard-2.7`; also `mx5-2.7` —
+`.exe` for the selected `--model` (default `pedalboard`; also `mx5` —
 see [Supported models](#supported-models)), builds the NAM-modded `Update.img`
 via Docker, and repacks a new installer `.exe` (see "Patching the Windows
 updater .exe" under For developers for how that repacking works). It leaves two
@@ -287,8 +307,8 @@ the model from the `Update.img`'s `compatible` string, or you force it with
 
 | `--model` | Device | Firmware | `compatible` | Status |
 |---|---|---|---|---|
-| `pedalboard-2.7` | HeadRush **Pedalboard** | 2.7 | *(default)* | confirmed on real hardware |
-| `mx5-2.7` | HeadRush **MX5** | 2.7 | `inmusic,hg04` | confirmed on real hardware |
+| `pedalboard` | HeadRush **Pedalboard** | 2.7 | *(default)* | confirmed on real hardware |
+| `mx5` | HeadRush **MX5** | 2.7 | `inmusic,hg04` | confirmed on real hardware |
 
 **Only flash the image built for _your exact model and firmware_** — flashing
 another model's image will almost certainly brick the device. The build refuses
@@ -312,11 +332,15 @@ reflash the stock `Update.img`. Keep a stock copy before flashing.
 ### Setup
 
 ```sh
-git clone --recurse-submodules <this-repo-url>
+git clone <this-repo-url>
 cd headrush-nam-mod
-# if you cloned without --recurse-submodules:
-git submodule update --init --recursive
 ```
+
+`nam_core/` (NeuralAmpModelerCore + the Eigen headers it needs) isn't a git
+submodule — `build.sh`/`build_docker.sh` fetch it automatically on first run
+via `scripts/fetch_nam_core.sh`, which pulls pinned-commit tarballs straight
+from GitHub/GitLab (no `git` required for this step). Run it yourself if you
+want it vendored ahead of time: `./scripts/fetch_nam_core.sh`.
 
 You'll also need a stock **HeadRush** firmware updater for your model — get
 `Update.img` out of the official `.app`/installer's `Contents/Resources/`
@@ -328,7 +352,7 @@ This repo does not include or distribute HeadRush's firmware.
 ```sh
 ./build.sh /path/to/stock/Update.img /path/to/output/Update_nam.img
 # force a specific model instead of auto-detecting:
-./build.sh /path/to/stock/Update.img /path/to/output/Update_nam.img --model mx5-2.7
+./build.sh /path/to/stock/Update.img /path/to/output/Update_nam.img --model mx5
 ```
 
 The model is auto-detected from the `Update.img` (`--model` overrides — see
@@ -398,9 +422,19 @@ byte-exact to stock and `Update.img` matches the patched input exactly.
 
 ### Repo layout
 
+- `install.sh` — true one-command install: downloads the repo as a tarball
+  (no `git` needed), detects your OS, and dispatches to the matching
+  quickstart script below. See "One-line install" above.
+- `scripts/fetch_nam_core.sh` — vendors `nam_core/` (NeuralAmpModelerCore +
+  Eigen headers) from pinned-commit GitHub/GitLab tarballs, no git submodule.
+  Called automatically by `build.sh`, `build_docker.sh`, and every quickstart
+  script; safe to re-run (no-ops if already populated).
 - `scripts/quickstart_mac.sh` — one-command macOS path: checks tools,
   downloads the stock Mac updater, runs the build, and patches a copy of
   the updater app in place. See Quick start above.
+- `scripts/quickstart_linux.sh` — one-command native-Linux path: checks
+  tools, downloads the stock Windows updater `.exe` (just used as an
+  `Update.img` source), builds via Docker. See Quick start above.
 - `scripts/quickstart_windows.sh` — one-command Windows path (run from
   Linux or WSL2): checks tools, downloads the stock Windows updater `.exe`,
   builds via Docker, and repacks a patched `.exe`. See Quick start above.
@@ -447,7 +481,8 @@ byte-exact to stock and `Update.img` matches the patched input exactly.
   `libnam_hook.so` with the same cross-compiler flags `build_update_img.py`
   uses).
 - `nam_core/` — [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
-  (MIT license), vendored as a git submodule.
+  (MIT license), fetched by `scripts/fetch_nam_core.sh` (not committed to
+  this repo, not a git submodule — see above).
 - `patch/patch_namloader.py`, `patch/patch_modfac_spy.py`,
   `patch/trampoline_naml.S`, `patch/trampoline_trim.S`,
   `patch/case92_stub.S`, `patch/test_nam_naml_e2e.c` — the additive

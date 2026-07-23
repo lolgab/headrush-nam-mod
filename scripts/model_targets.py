@@ -44,7 +44,7 @@ class ModelTarget:
 # Also the DEFAULT_TARGET, so an unrecognized `compatible` still falls here
 # (guarded by patch_gonkulator.py's slot-value check).
 PEDALBOARD_2_7 = ModelTarget(
-    name="pedalboard-2.7",
+    name="pedalboard",
     match_compatible="inmusic,mg01",
     engine_vtable_vaddr=0x1839044,
     orig_process_fn=0x3260e0,
@@ -66,7 +66,7 @@ PEDALBOARD_2_7 = ModelTarget(
 # is targeted here -- the beta will (correctly) fail patch_gonkulator.py's
 # slot-value guard if fed to this target.
 MX5_2_7 = ModelTarget(
-    name="mx5-2.7",
+    name="mx5",
     match_compatible="inmusic,hg04",
     engine_vtable_vaddr=0x17ee460,
     orig_process_fn=0x302ed0,
@@ -74,7 +74,7 @@ MX5_2_7 = ModelTarget(
 )
 
 TARGETS = {t.name: t for t in (PEDALBOARD_2_7, MX5_2_7)}
-DEFAULT_TARGET = "pedalboard-2.7"
+DEFAULT_TARGET = "pedalboard"
 
 
 def select_target(model_name: Optional[str], compatible: Optional[str]):

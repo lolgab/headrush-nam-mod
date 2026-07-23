@@ -4,11 +4,11 @@
 # Desktop's WSL2 backend makes docker available inside your WSL distro with
 # no extra setup -- see https://docs.docker.com/desktop/wsl/).
 #
-# 1. Checks required tools are installed (docker, 7z, git) -- prints the
+# 1. Checks required tools are installed (docker, 7z) -- prints the
 #    exact install commands and exits if anything is missing, never installs
 #    anything itself.
 # 2. Downloads the official HeadRush Windows firmware updater .exe for the
-#    selected --model (default: pedalboard-2.7; also mx5-2.7).
+#    selected --model (default: pedalboard; also mx5).
 # 3. Extracts its embedded Update.img, builds the NAM-modded version via
 #    docker (scripts/build_docker.sh -- pins exact toolchain/e2fsprogs/
 #    u-boot-tools versions so it works the same regardless of host distro),
@@ -25,23 +25,23 @@ DIR="$(cd "$(dirname "$0")/.." && pwd)"
 die() { echo "ERROR: $*" >&2; exit 1; }
 
 # ---- model selection (which device's updater to fetch + patch) -------------
-MODEL="pedalboard-2.7"
+MODEL="pedalboard"
 while [ $# -gt 0 ]; do
     case "$1" in
         --model)   MODEL="${2:-}"; shift 2 ;;
         --model=*) MODEL="${1#*=}"; shift ;;
-        -h|--help) echo "usage: $(basename "$0") [--model pedalboard-2.7|mx5-2.7]"; exit 0 ;;
-        *)         die "unknown argument: $1 (usage: $(basename "$0") [--model pedalboard-2.7|mx5-2.7])" ;;
+        -h|--help) echo "usage: $(basename "$0") [--model pedalboard|mx5]"; exit 0 ;;
+        *)         die "unknown argument: $1 (usage: $(basename "$0") [--model pedalboard|mx5])" ;;
     esac
 done
 
 case "$MODEL" in
-    pedalboard-2.7)
+    pedalboard)
         FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/Pedalboard%20v2.7/Windows%20Updater/HeadRush%20Pedalboard%202.7%20Firmware%20Updater%20-%20Win.exe.zip" ;;
-    mx5-2.7)
+    mx5)
         FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/MX5%20v2.7/Windows%20Updater/HeadRush%20MX5%202.7%20Firmware%20Updater%20-%20Win.exe.zip" ;;
     *)
-        die "unknown --model '$MODEL' (known: pedalboard-2.7, mx5-2.7)" ;;
+        die "unknown --model '$MODEL' (known: pedalboard, mx5)" ;;
 esac
 
 # ---- 1. tool check ---------------------------------------------------------
@@ -56,7 +56,6 @@ check() {
 check "docker -- install Docker Desktop (Windows/WSL2: https://docs.docker.com/desktop/wsl/) or docker-ce (Linux)" docker
 check "7z -- Debian/Ubuntu/WSL: sudo apt install p7zip-full" 7z
 check "unzip -- Debian/Ubuntu/WSL: sudo apt install unzip" unzip
-check "git -- Debian/Ubuntu/WSL: sudo apt install git" git
 check "curl -- Debian/Ubuntu/WSL: sudo apt install curl" curl
 
 if [ ${#missing[@]} -gt 0 ]; then
@@ -67,10 +66,7 @@ fi
 
 docker info >/dev/null 2>&1 || die "docker CLI found but the daemon isn't reachable -- start Docker Desktop (or the docker service) and retry."
 
-if [ ! -e "$DIR/nam_core/CMakeLists.txt" ]; then
-    echo "nam_core submodule not initialized -- fetching it..."
-    git -C "$DIR" submodule update --init --recursive
-fi
+"$DIR/scripts/fetch_nam_core.sh"
 
 # ---- 2. download the stock Windows updater ---------------------------------
 WORK="$(mktemp -d)"
