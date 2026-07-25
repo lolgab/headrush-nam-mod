@@ -73,7 +73,42 @@ MX5_2_7 = ModelTarget(
     qml_renames=None,
 )
 
-TARGETS = {t.name: t for t in (PEDALBOARD_2_7, MX5_2_7)}
+# HeadRush Gigboard 2.7 (compatible "inmusic,hg02"). Same RK3288 armv7 hard-float
+# non-PIE Evil, same DSPModule<AnxietyOD,...> class -- addresses re-derived the
+# same way as MX5's: RTTI xref-chase (mangled name string ->
+# N8EvilDSPs9DSPModuleINS_9AnxietyODE...E -> type_info -> wrapper vtable
+# 0x17df754) to locate AnxietyOD's own ctor/clone function (wrapper vtable slot
+# 19, vaddr 0x2a1ee0), then read the real engine vtable straight from that
+# function's literal pool (0x17f2234 -- AnxietyOD has RTTI, so like Pedalboard/
+# MX5 its ctor embeds the real vtable directly, no generic-placeholder
+# indirection). Slot 8 of that vtable (0x302840) was cross-checked against
+# Pedalboard/MX5's known process() signature: identical strd r4/r5, strd r8/r9,
+# strd r6/r7, strd r10/r11, str lr, vpush d8 prologue, and the identical
+# this-relative `ldrb r3, [r0, #0x29c]` flag read; slot 15's setter also writes
+# the model-select knob field at the same +0x2ac offset. ELF layout (one plain
+# R+E LOAD segment, one plain R+W, >3KB zero code-cave right after the R+E
+# segment's file end) matches patch_gonkulator.py's assumptions.
+# QML knob relabel is disabled: like MX5, no per-pedal `propertyPath: "/Engine/
+# Patch/Anxiety OD"` QML source blob was found (Gigboard's Evil only embeds QML
+# source for a handful of other pedals) -- knob names come from a shared string
+# pool, so relabeling would hit every pedal.
+# STATUS: derived and cross-checked by static analysis only (same method that
+# nailed Pedalboard/MX5's addresses) -- NOT YET flashed to a real Gigboard. No
+# publicly documented footswitch-hold hardware recovery mode was found for the
+# Gigboard either (unlike Pedalboard's "1 & 8" / MX5's "first two"); the stock
+# firmware-update path is UI-driven (Global Settings > Firmware Update). Until
+# a real-device flash + recovery test confirms both, treat this target as
+# unverified and do not flash a modified image to a Gigboard you can't afford
+# to risk.
+GIGBOARD_2_7 = ModelTarget(
+    name="gigboard",
+    match_compatible="inmusic,hg02",
+    engine_vtable_vaddr=0x17f2234,
+    orig_process_fn=0x302840,
+    qml_renames=None,
+)
+
+TARGETS = {t.name: t for t in (PEDALBOARD_2_7, MX5_2_7, GIGBOARD_2_7)}
 DEFAULT_TARGET = "pedalboard"
 
 

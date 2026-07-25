@@ -6,7 +6,7 @@
 #    exact install commands and exits if anything is missing, never installs
 #    anything itself.
 # 2. Downloads the official HeadRush Windows firmware updater .exe for the
-#    selected --model (default: pedalboard; also mx5) -- this is just
+#    selected --model (default: pedalboard; also mx5, gigboard) -- this is just
 #    a 7z self-extracting archive, no Windows needed to unpack it.
 # 3. Extracts its embedded Update.img and builds the NAM-modded version via
 #    docker (scripts/build_docker.sh -- pins exact toolchain/e2fsprogs/
@@ -28,8 +28,8 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --model)   MODEL="${2:-}"; shift 2 ;;
         --model=*) MODEL="${1#*=}"; shift ;;
-        -h|--help) echo "usage: $(basename "$0") [--model pedalboard|mx5]"; exit 0 ;;
-        *)         die "unknown argument: $1 (usage: $(basename "$0") [--model pedalboard|mx5])" ;;
+        -h|--help) echo "usage: $(basename "$0") [--model pedalboard|mx5|gigboard]"; exit 0 ;;
+        *)         die "unknown argument: $1 (usage: $(basename "$0") [--model pedalboard|mx5|gigboard])" ;;
     esac
 done
 
@@ -38,8 +38,10 @@ case "$MODEL" in
         FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/Pedalboard%20v2.7/Windows%20Updater/HeadRush%20Pedalboard%202.7%20Firmware%20Updater%20-%20Win.exe.zip" ;;
     mx5)
         FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/MX5%20v2.7/Windows%20Updater/HeadRush%20MX5%202.7%20Firmware%20Updater%20-%20Win.exe.zip" ;;
+    gigboard)
+        FW_URL="https://cdn.inmusicbrands.com/HeadRush/FW/Aug24_Firmware_Updates/Gigboard%20v2.7/Windows%20Updater/HeadRush%20Gigboard%202.7%20Firmware%20Updater%20-%20Win.exe.zip" ;;
     *)
-        die "unknown --model '$MODEL' (known: pedalboard, mx5)" ;;
+        die "unknown --model '$MODEL' (known: pedalboard, mx5, gigboard)" ;;
 esac
 
 # ---- 1. tool check ---------------------------------------------------------

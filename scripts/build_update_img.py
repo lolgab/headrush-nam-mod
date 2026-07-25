@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-build_update_img.py -- take a stock HeadRush Update.img (Pedalboard 2.7 or MX5
-2.7 -- auto-detected, or pick with --model; see scripts/model_targets.py) and
+build_update_img.py -- take a stock HeadRush Update.img (Pedalboard 2.7, MX5
+2.7, or Gigboard 2.7 -- auto-detected, or pick with --model; see
+scripts/model_targets.py) and
 produce a modified one with the NAM (Neural Amp Modeler) mod applied via the
 Anxiety OD (v1) pedal's process() hijack (patch_gonkulator.py) -- the user's
 own choice of a pedal they're fine sacrificing board-wide (Gonkulator turned
