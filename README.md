@@ -1,14 +1,11 @@
-# HeadRush Pedalboard, MX5 & Gigboard — Neural Amp Modeler (NAM) mod
+# HeadRush Pedalboard & MX5 — Neural Amp Modeler (NAM) mod
 
-Reverse-engineered firmware mod for the HeadRush Pedalboard, MX5, and
-Gigboard, adding
+Reverse-engineered firmware mod for the HeadRush Pedalboard and MX5, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
-**Status**: a real, working NAM pedal on the Pedalboard and MX5, confirmed on
-real hardware. Gigboard support is reverse-engineered and structurally
-validated but **not yet flashed to a real device** — see
-[Supported models](#supported-models) before using it.
+**Status**: a real, working NAM pedal today, via a hijacked pedal slot,
+confirmed on real hardware — see [Supported models](#supported-models).
 
 ## For users
 
@@ -19,9 +16,8 @@ your OS, and runs the matching quickstart below for you:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/lolgab/headrush-nam-mod/main/install.sh | bash
-# force the MX5 (or Gigboard) instead of the default Pedalboard:
+# force the MX5 instead of the default Pedalboard:
 curl -fsSL https://raw.githubusercontent.com/lolgab/headrush-nam-mod/main/install.sh | bash -s -- --model mx5
-curl -fsSL https://raw.githubusercontent.com/lolgab/headrush-nam-mod/main/install.sh | bash -s -- --model gigboard
 ```
 
 Works on macOS, native Linux, and WSL2 (picks the Windows `.exe`-producing
@@ -36,15 +32,14 @@ one, in one command:
 ```sh
 git clone <this-repo-url>
 cd headrush-nam-mod
-./scripts/quickstart_mac.sh                     # HeadRush Pedalboard (default)
-./scripts/quickstart_mac.sh --model mx5         # HeadRush MX5
-./scripts/quickstart_mac.sh --model gigboard    # HeadRush Gigboard (unverified -- see below)
+./scripts/quickstart_mac.sh                 # HeadRush Pedalboard (default)
+./scripts/quickstart_mac.sh --model mx5     # HeadRush MX5
 ```
 
 This checks you have the required build tools installed (prints the exact
 `brew install` commands and stops if anything's missing — it never installs
 anything itself), downloads the official HeadRush Mac updater for the
-selected `--model` (default `pedalboard`; also `mx5`, `gigboard` — see
+selected `--model` (default `pedalboard`; also `mx5` — see
 [Supported models](#supported-models)), patches it with the NAM mod, and
 drops two apps in your current directory, e.g. for the default Pedalboard:
 
@@ -63,9 +58,8 @@ distro's versions behave):
 ```sh
 git clone <this-repo-url>
 cd headrush-nam-mod
-./scripts/quickstart_linux.sh                     # HeadRush Pedalboard (default)
-./scripts/quickstart_linux.sh --model mx5         # HeadRush MX5
-./scripts/quickstart_linux.sh --model gigboard    # HeadRush Gigboard (unverified -- see below)
+./scripts/quickstart_linux.sh                 # HeadRush Pedalboard (default)
+./scripts/quickstart_linux.sh --model mx5     # HeadRush MX5
 ```
 
 This checks required tools (docker, 7z, unzip, curl), downloads the
@@ -93,13 +87,12 @@ Ubuntu):
 sudo apt install p7zip-full unzip git curl   # if not already present
 git clone <this-repo-url>
 cd headrush-nam-mod
-./scripts/quickstart_windows.sh                     # HeadRush Pedalboard (default)
-./scripts/quickstart_windows.sh --model mx5         # HeadRush MX5
-./scripts/quickstart_windows.sh --model gigboard    # HeadRush Gigboard (unverified -- see below)
+./scripts/quickstart_windows.sh                 # HeadRush Pedalboard (default)
+./scripts/quickstart_windows.sh --model mx5     # HeadRush MX5
 ```
 
 This checks required tools, downloads the official HeadRush **Windows** updater
-`.exe` for the selected `--model` (default `pedalboard`; also `mx5`, `gigboard` —
+`.exe` for the selected `--model` (default `pedalboard`; also `mx5` —
 see [Supported models](#supported-models)), builds the NAM-modded `Update.img`
 via Docker, and repacks a new installer `.exe` (see "Patching the Windows
 updater .exe" under For developers for how that repacking works). It leaves two
@@ -144,17 +137,17 @@ on the device, add the **Anxiety OD** pedal.
 | **LEVEL** | output trim |
 
 On the **Pedalboard** the on-screen labels are relabeled to match (Model / Inp /
-Outp); on the **MX5** and **Gigboard** they keep their original **Drive / Tone /
-Level** names but do exactly the same thing (see [Supported models](#supported-models)).
+Outp); on the **MX5** they keep their original **Drive / Tone / Level** names but
+do exactly the same thing (see [Supported models](#supported-models)).
 
 ## For developers / maintainers
 
 ### What this does
 
-Takes a stock HeadRush Pedalboard, MX5, or Gigboard firmware update
-file (`Update.img`) and produces a modified one that hijacks the **Anxiety OD
-(v1)** pedal's `process()` function, replacing its overdrive DSP with NAM
-inference. The model is auto-detected (see [Supported models](#supported-models)).
+Takes a stock HeadRush Pedalboard or MX5 firmware update file (`Update.img`)
+and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
+`process()` function, replacing its overdrive DSP with NAM inference. The
+model is auto-detected (see [Supported models](#supported-models)).
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
 on every instance. It's fine since there is Anxiety OS V2 that is still available.
@@ -162,9 +155,9 @@ on every instance. It's fine since there is Anxiety OS V2 that is still availabl
 #### Knob implementation
 
 Anxiety OD's on-screen labels are patched (on the **Pedalboard** only — the MX5
-and Gigboard keep their stock labels, see [Supported models](#supported-models))
-to match what they now do (see "Using it" under For users above for what each
-knob does day to day):
+keeps its stock labels, see [Supported models](#supported-models)) to match what
+they now do (see "Using it" under For users above for what each knob does day to
+day):
 
 | Original | Function |
 |---|---|
@@ -316,7 +309,7 @@ the model from the `Update.img`'s `compatible` string, or you force it with
 |---|---|---|---|
 | `pedalboard` | HeadRush **Pedalboard** | *(default)* | confirmed on real hardware |
 | `mx5` | HeadRush **MX5** | `inmusic,hg04` | confirmed on real hardware |
-| `gigboard` | HeadRush **Gigboard** | `inmusic,hg02` | **reverse-engineered only, NOT flashed to a real device** — see warning below |
+| `gigboard` | HeadRush **Gigboard** | `inmusic,hg02` | **⚠️ do not use — see warning below** |
 
 **Only flash the image built for _your exact model and firmware_** — flashing
 another model's image will almost certainly brick the device. The build refuses
@@ -337,37 +330,42 @@ names while doing model-select / input-trim / output-trim.
 **first two footswitches** while powering on to force firmware-update mode, then
 reflash the stock `Update.img`. Keep a stock copy before flashing.
 
-**Gigboard is a static-analysis-only port — do not flash it to a device you
-can't afford to risk yet.** Same method that nailed Pedalboard/MX5 (RTTI
-xref-chase to the AnxietyOD wrapper vtable, ctor/clone literal-pool read for
-the real engine vtable, then a byte-for-byte process()-signature match:
-identical register-save prologue and the identical `+0x29c` this-relative flag
-read / `+0x2ac` knob-field offset seen on the other two models) was used to
-derive `scripts/model_targets.py`'s Gigboard addresses, and the `Update.img`
-structurally checks out (same unsigned FIT/ext2 layout, exactly one R+E and
-one R+W `Evil` LOAD segment, a >3KB zero code-cave, and the vtable slot holds
-exactly the expected value). The full `build_docker.sh` pipeline was run
-end-to-end against a real stock Gigboard `Update.img` (patch, cross-compile,
-repack, `e2fsck -fn`, byte-exact round-trip verify) and completed with no
-errors — but **none of this has been run on actual Gigboard hardware.** Two
-things are unconfirmed:
-- Whether the patched `Evil` actually boots and processes audio correctly (the
-  Pedalboard/MX5 ports both needed a real-device A/B pass to catch a
-  boot-breaking issue that never reproduced under QEMU — see
-  `patch/patch_gonkulator.py`'s docstring).
-- **Gigboard's hardware/bootloader recovery mode is undocumented.** Unlike the
-  Pedalboard's "hold footswitches 1 & 8 while powering on" or the MX5's "first
-  two footswitches", no publicly documented footswitch-hold combo forces
-  firmware-update mode on the Gigboard — its stock update flow is UI-driven
-  (Global Settings → Firmware Update). If a bad flash prevents the touchscreen
-  UI from booting, there may be no way to force a recovery reflash. Before
-  flashing anything, verify on your own (still-working) Gigboard whether some
-  footswitch combination forces firmware-update mode at power-on — the same
-  RK3288/U-Boot lineage as the Pedalboard/MX5 makes it plausible one exists,
-  but this has not been confirmed.
+### ⚠️ Gigboard: DO NOT FLASH — unsupported, high brick risk, no recovery path
 
-If you test this on real Gigboard hardware, please report back (success or
-failure) so this table can be updated.
+**`--model gigboard` exists in the code but is not a supported, usable target.
+Do not run it against a real device. This is not a recommendation — it is a
+warning to stay away until someone confirms recovery works.**
+
+Why this is riskier than Pedalboard/MX5, specifically:
+
+- **No known way to recover from a bad flash.** Pedalboard recovers via
+  footswitches 1 & 8 held at power-on; MX5 via the first two footswitches.
+  No equivalent footswitch-hold combo for the Gigboard is documented anywhere
+  public. Its stock firmware-update flow is entirely UI-driven (Global
+  Settings → Firmware Update on the touchscreen). The one Gigboard hardware
+  combo that *is* documented — footswitches 3+4 at power-on — is a **factory
+  reset** (wipes rigs/settings), a different function, confirmed not to be a
+  recovery-mode trigger. **If a bad flash breaks the touchscreen UI, there may
+  be no way to force the device back into a flashable state at all.**
+- **Never run on real hardware.** The addresses in
+  `scripts/model_targets.py` were derived by static analysis only (same
+  RTTI xref-chase + ctor literal-pool method used for Pedalboard/MX5, and
+  cross-checked against their known `process()` signature — identical
+  register-save prologue, identical `+0x29c` this-relative flag read,
+  identical `+0x2ac` knob-field offset), and the full `build_docker.sh`
+  pipeline runs clean end-to-end against a real stock Gigboard `Update.img`
+  (patch, cross-compile, repack, `e2fsck -fn`, byte-exact round-trip verify).
+  None of that proves the patched `Evil` actually boots or processes audio
+  correctly — Pedalboard/MX5 both needed a real-device A/B pass to catch a
+  boot-breaking issue that never reproduced under QEMU (see
+  `patch/patch_gonkulator.py`'s docstring). Static analysis and a clean build
+  are necessary, not sufficient.
+
+**Do not flash a Gigboard you aren't prepared to lose.** If you're willing to
+experiment anyway: back up the stock `Update.img`, and first check — on a
+still-working device — whether *any* footswitch combination forces
+firmware-update mode at power-on, before ever writing a modified image.
+Report back either way so this section can be updated.
 
 ### Setup
 
@@ -418,9 +416,7 @@ Pass `--keep-work-dir` to leave the intermediate build directory in place
 4. **Recovery, if a flash goes wrong**: force firmware-update/recovery mode by
    holding, while powering on, footswitches **1 and 8** on the Pedalboard
    (leftmost, counting left to right) or the **first two** footswitches on the
-   MX5, then reflash the original `Update.img`. **Gigboard has no documented
-   equivalent** — see the warning under [Supported models](#supported-models)
-   before flashing one.
+   MX5, then reflash the original `Update.img`.
 
 The FIT image format has no cryptographic signature check on the rootfs
 itself (only SHA1 integrity hashes, which `mkimage` recomputes correctly for
@@ -428,8 +424,8 @@ the modified data). Tested on real HeadRush Pedalboard and MX5 devices:
 NAM inference works, and the device can be safely recovered back to stock
 firmware via the footswitch recovery mode (see step 4 above, and
 [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a Pedalboard
-walkthrough). Gigboard has NOT been tested on real hardware. Proceed at your
-own risk.
+walkthrough). Proceed at your own risk. (Gigboard: see the dedicated warning
+under [Supported models](#supported-models) — do not flash it.)
 
 ### Patching the Windows updater .exe
 
@@ -491,8 +487,9 @@ byte-exact to stock and `Update.img` matches the patched input exactly.
   patching, cross-compilation, repacking, verification, glibc-compat check).
 - `scripts/model_targets.py` — per-model/firmware registry of the values that
   differ per `Evil` (engine vtable + `process()` address, QML label offsets) that
-  lets one pipeline target the Pedalboard, MX5, and Gigboard.
-  Auto-detected by `compatible`.
+  lets one pipeline target the Pedalboard and MX5 (also holds an unsupported
+  Gigboard entry — see the warning under Supported models). Auto-detected by
+  `compatible`.
 - `scripts/repack_windows_updater.py` — swaps `Update.img` inside the
   Windows updater `.exe`'s embedded 7z archive for a patched one. See
   "Patching the Windows updater .exe" above.
