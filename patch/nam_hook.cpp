@@ -923,19 +923,30 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
   // (no audio is produced from it either way) and means the load/duck-and-
   // switch/prewarm all happen in the background WHILE bypassed, finishing
   // (or getting much closer to finished) before the user ever un-bypasses.
-  const float prev = s.last_seen_knob_raw.exchange(drive_raw, std::memory_order_acq_rel);
+  s.last_seen_knob_raw.store(drive_raw, std::memory_order_release);
   bool ready = s.ready.load(std::memory_order_acquire);
   if (!ready)
   {
-    // NaN-safe inequality: prev != prev is true only for the initial NaN
-    // sentinel, guaranteeing the first call always attempts a load. No
-    // settle delay here -- nothing is playing yet to protect from a
-    // premature switch, so get the first model in as fast as possible (also
-    // retries every call while not yet ready, debounced inside
-    // switch_model_in_background -- covers the lazy model preload, see
-    // preload_models_in_background, not having started/finished yet).
-    if (drive_raw != prev || prev != prev)
-      switch_model_in_background(s, drive_raw);
+    // Unconditional retry every call while not yet ready -- no settle
+    // delay needed here, nothing is playing yet to protect from a
+    // premature switch, so get the first model in as fast as possible.
+    // switch_model_in_background's own kMinSwitchIntervalMs debounce (and
+    // its `switching` in-flight guard) already makes calling this on
+    // every block cheap and safe.
+    //
+    // Deliberately NOT gated on drive_raw having changed since the last
+    // call (an earlier version was, "if changed-or-first-ever-call") --
+    // confirmed on real hardware as a real "model never loads" bug: if
+    // the knob sits perfectly still from power-on (the common case -- no
+    // footswitch engaged yet, nobody touching Drive), the very first
+    // process() call kicks off preload_models_in_background() and
+    // returns (see switch_model_in_background's own !g_models_ready
+    // branch) without yet having a model to install. With the old
+    // change-gated retry, no later call would ever try again, since
+    // drive_raw never differs from the value already stored as `prev` --
+    // permanently stuck dry-passthrough. Retrying unconditionally instead
+    // means the very next call after preload finishes picks it up.
+    switch_model_in_background(s, drive_raw);
   }
   else
   {
