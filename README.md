@@ -121,12 +121,19 @@ unrecognized publisher, which is expected for any unofficial build.
 Drop `.nam` files into their own **`/NAM`** folder on the USB drive (sibling
 to `Impulse Responses`, `Blocks`, `Rigs`, etc — create it yourself via the
 File Manager/USB transfer view if it doesn't exist yet). Files are sorted
-alphabetically and divided evenly across the Model knob's sweep — name them
-with an index prefix so you know the order:
+alphabetically and assigned one per whole percent of the Model knob's sweep,
+starting at 0% — name them with a 3-digit index prefix matching the knob
+percentage so the number on the file is the number on the knob:
 
-- 01 - Your first model.nam
-- 02 - Your second model.nam
-- 03 - Your third model.nam
+- 000 - First Model.nam
+- 001 - Second Model.nam
+- 002 - Third Model.nam
+
+With 3 files as above, 0%-2% select them in order; the rest of the knob's
+sweep (3%-100%) is silence — no file is assigned there, so the pedal outputs
+nothing. This is deliberate: it keeps each file pinned to a fixed knob
+position regardless of how many other files are on the drive, instead of the
+position drifting every time you add or remove one.
 
 on the device, add the **Anxiety OD** pedal.
 
@@ -166,12 +173,18 @@ day):
 | Level | output trim |
 | Hi-Lo | doesn't do to anything |
 
-The Model knob's full sweep divides into N equal zones, one per `.nam` file
-found (sorted alphabetically). The `/NAM` folder is scanned once, the first
-time Anxiety OD's `process()` runs — but that now happens regardless of
-bypass state, not gated behind the pedal's first non-bypass engage (see
-below). After that, switching models is instant — it re-parses already-
-cached JSON, no disk I/O.
+The Model knob has a fixed 101 positions (0%-100%, one per whole percent).
+Each position selects one `.nam` file, in alphabetical order, starting at 0%:
+with N files found, positions `0..N-1` (percent) each play a file and
+positions `N..100` are unmapped and render silence — not the previous/nearest
+file, and not dry passthrough. This keeps a given file's knob position stable
+across boots regardless of how many other files are present, instead of the
+old scheme of dividing the sweep into N equal zones (which shifted every
+file's position whenever one was added or removed). The `/NAM` folder is
+scanned once, the first time Anxiety OD's `process()` runs — but that now
+happens regardless of bypass state, not gated behind the pedal's first
+non-bypass engage (see below). After that, switching models is instant — it
+re-parses already-cached JSON, no disk I/O.
 
 Loading at Evil startup itself (via the `LD_PRELOAD` constructor, before
 Evil's own `main()` runs) was tried twice and reverted both times on real

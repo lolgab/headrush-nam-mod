@@ -357,20 +357,33 @@ void preload_models_in_background()
   });
 }
 
-// Maps a raw knob value to a model index: divides the knob's full sweep into
-// N equal zones, one per *.nam file currently found (N re-evaluated on every
-// switch, so adding/removing files on the USB drive changes the zone count
-// live, no fixed/static slot count).
+// Fixed 101-position knob (0%..100%, one .nam file per whole percent) instead
+// of the old scheme of dividing the sweep into N equal zones sized to however
+// many files were found. With N files present, only steps 0..N-1 (the first
+// N% of the sweep) select a file; steps N..100 are deliberately unmapped and
+// must render as silence (see nam_process_gonk's fade_state==0 branch and its
+// fade-to-silence swap) rather than falling back to the previous/nearest
+// file -- that would silently hide the fact that no file is assigned there.
+constexpr int kKnobSteps = 101;
+
+// Returns:
+//   >= 0  -- file index to load (equal to the step number itself: step N
+//            plays g_cached_models[N]).
+//   -1    -- valid, resolved position, but this step has no file assigned
+//            (step number >= file_count) -- caller must produce silence.
+//   -2    -- no *.nam files available at all -- caller should stay in the
+//            pre-ready dry-passthrough state, same as before this scheme.
 int knob_value_to_index(float raw, int file_count)
 {
   if (file_count <= 0)
-    return -1;
+    return -2;
   const float lo = knob_min();
   const float hi = knob_max();
   float t = (hi > lo) ? (raw - lo) / (hi - lo) : 0.0f;
   t = std::clamp(t, 0.0f, 1.0f);
-  int idx = static_cast<int>(t * static_cast<float>(file_count));
-  return std::clamp(idx, 0, file_count - 1);
+  int step = static_cast<int>(t * static_cast<float>(kKnobSteps - 1) + 0.5f);
+  step = std::clamp(step, 0, kKnobSteps - 1);
+  return (step < file_count) ? step : -1;
 }
 
 // Max channels we ever need to handle (Gonkulator ABI reports 1 or 2).
@@ -671,8 +684,21 @@ void switch_model_in_background(ModelState& s, float raw)
       } reset{s.switching};
 
       const int idx = knob_value_to_index(raw, static_cast<int>(g_cached_models.size()));
-      if (idx < 0 || idx == s.active_index.load(std::memory_order_acquire))
-        return; // no files found, or knob moved but landed back on the same zone
+      if (idx == -2 || idx == s.active_index.load(std::memory_order_acquire))
+        return; // no files found at all, or knob moved but landed back on the same state
+
+      if (idx == -1)
+      {
+        // This step has no file assigned -- target is silence. Nothing to
+        // build/prewarm/calibrate; just stage the silent target so the audio
+        // thread ducks out the current model and swaps to nothing (see
+        // nam_process_gonk's fade-complete swap and fade_state==0 branch).
+        for (int i = 0; i < kMaxChannels; ++i)
+          s.pending_dsp[i].reset();
+        s.pending_index = idx;
+        s.pending_ready.store(true, std::memory_order_release);
+        return;
+      }
       const nlohmann::json& config = g_cached_models[static_cast<size_t>(idx)].config;
 
       std::unique_ptr<nam::DSP> loaded[kMaxChannels];
@@ -929,7 +955,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.candidate_index = target_idx;
       s.candidate_since_ms = now_ms();
     }
-    else if (target_idx >= 0 && target_idx != s.active_index.load(std::memory_order_acquire)
+    else if (target_idx != -2 && target_idx != s.active_index.load(std::memory_order_acquire)
              && now_ms() - s.candidate_since_ms >= kKnobSettleMs)
     {
       switch_model_in_background(s, drive_raw);
@@ -949,7 +975,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     // right now; a stale one is silently dropped (no fade played for it)
     // and immediately replaced by a fresh request for the current target.
     const int current_idx = knob_value_to_index(drive_raw, static_cast<int>(g_cached_models.size()));
-    if (ready && current_idx >= 0 && current_idx != s.pending_index)
+    if (ready && current_idx != -2 && current_idx != s.pending_index)
     {
       for (int i = 0; i < kMaxChannels; ++i)
         s.pending_dsp[i].reset();
@@ -1006,12 +1032,20 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
         output[ch][i] = std::clamp(input[ch][i] * in_gain, -1.0f, 1.0f);
 
   const int fade_state = s.fade_state.load(std::memory_order_relaxed);
+  const bool silent_active = s.active_index.load(std::memory_order_relaxed) < 0;
   if (fade_state == 0)
   {
     for (uint32_t ch = 0; ch < numChannels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
+      if (silent_active)
+      {
+        // This knob step has no file assigned -- render silence, not the dry
+        // signal the input-clamp loop above just wrote into output[ch].
+        std::fill(output[ch], output[ch] + numFrames, 0.0f);
+        continue;
+      }
       float* in_arr[1] = {output[ch]};
       float* out_arr[1] = {output[ch]};
       s.dsp[ch]->process(in_arr, out_arr, numFrames);
@@ -1023,6 +1057,14 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     {
       if (!input[ch] || !output[ch])
         continue;
+      if (silent_active)
+      {
+        // Already silent (this step had no file assigned) -- nothing to duck
+        // out of, and s.dsp[ch] is null. Just hold silence through the fade
+        // window so the swap below fires on schedule.
+        std::fill(output[ch], output[ch] + numFrames, 0.0f);
+        continue;
+      }
       float* in_arr[1] = {output[ch]};
       float* out_arr[1] = {output[ch]};
       s.dsp[ch]->process(in_arr, out_arr, numFrames);
@@ -1041,7 +1083,10 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.active_index.store(s.pending_index, std::memory_order_release);
       s.pending_ready.store(false, std::memory_order_release);
       s.fade_progress = 0;
-      s.fade_state.store(2, std::memory_order_relaxed); // start fading IN the new model
+      // If the new target is itself silence (no file assigned to this step),
+      // there's no model to fade IN -- go straight back to steady state,
+      // where the fade_state==0 branch above already renders silence.
+      s.fade_state.store(s.pending_index < 0 ? 0 : 2, std::memory_order_relaxed);
     }
   }
   else // fade_state == 2: fading IN the newly-installed model
