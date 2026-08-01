@@ -17,28 +17,16 @@ static void set_err(char* err, size_t err_size, const char* fmt, ...)
   va_end(ap);
 }
 
+/* This whole file only ever compiles for _WIN32 (see CMakeLists.txt) --
+ * every system() call below is deliberately cmd.exe syntax (double-quote
+ * paths, "mkdir" with no -p since Windows' own mkdir already creates
+ * intermediate directories, ">nul" not ">/dev/null"), not a portable
+ * shell abstraction. No embedded-quote escaping: every path passed
+ * through here is built from our own temp directory plus fixed filenames
+ * (see EXPECTED_ENTRIES below), never arbitrary/user-supplied text. */
 static void shell_quote(const char* path, char* out, size_t out_size)
 {
-  size_t pos = 0;
-  if (pos < out_size - 1)
-    out[pos++] = '\'';
-  for (const char* p = path; *p && pos < out_size - 5; ++p)
-  {
-    if (*p == '\'')
-    {
-      out[pos++] = '\'';
-      out[pos++] = '\\';
-      out[pos++] = '\'';
-      out[pos++] = '\'';
-    }
-    else
-    {
-      out[pos++] = *p;
-    }
-  }
-  if (pos < out_size - 1)
-    out[pos++] = '\'';
-  out[pos] = '\0';
+  snprintf(out, out_size, "\"%s\"", path);
 }
 
 static uint32_t rd32(const uint8_t* d, size_t off)
@@ -226,7 +214,7 @@ bool nam_win_extract_stock_img(const char* stock_exe_path, const char* sevenzip_
   char q1[1300], q2[1300], cmd[3200];
   shell_quote(payload_dir, q1, sizeof(q1));
   shell_quote(stock7z_path, q2, sizeof(q2));
-  snprintf(cmd, sizeof(cmd), "mkdir -p %s && %s x -o%s %s -y >/dev/null", q1, sevenzip_path, q1, q2);
+  snprintf(cmd, sizeof(cmd), "if not exist %s mkdir %s && %s x -o%s %s -y >nul", q1, q1, sevenzip_path, q1, q2);
   if (system(cmd) != 0)
   {
     set_err(err, err_size, "extracting the stock updater's embedded 7z archive failed");
@@ -299,7 +287,7 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
   char cmd[3200];
   shell_quote(payload_dir, q1, sizeof(q1));
   shell_quote(stock7z_path, q2, sizeof(q2));
-  snprintf(cmd, sizeof(cmd), "mkdir -p %s && %s x -o%s %s -y >/dev/null", q1, sevenzip_path, q1, q2);
+  snprintf(cmd, sizeof(cmd), "if not exist %s mkdir %s && %s x -o%s %s -y >nul", q1, q1, sevenzip_path, q1, q2);
   if (system(cmd) != 0)
   {
     set_err(err, err_size, "extracting the stock updater's embedded 7z archive failed");
@@ -341,7 +329,7 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
     strncat(names, qn, sizeof(names) - strlen(names) - 1);
     strncat(names, " ", sizeof(names) - strlen(names) - 1);
   }
-  snprintf(cmd, sizeof(cmd), "cd %s && %s a %s %s >/dev/null", q2, sevenzip_path, q1, names);
+  snprintf(cmd, sizeof(cmd), "cd /d %s && %s a %s %s >nul", q2, sevenzip_path, q1, names);
   if (system(cmd) != 0)
   {
     set_err(err, err_size, "creating the new 7z archive failed");
@@ -373,7 +361,7 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
 
   /* ---- round-trip verification ---- */
   shell_quote(output_exe_path, q1, sizeof(q1));
-  snprintf(cmd, sizeof(cmd), "%s t %s >/dev/null", sevenzip_path, q1);
+  snprintf(cmd, sizeof(cmd), "%s t %s >nul", sevenzip_path, q1);
   if (system(cmd) != 0)
   {
     set_err(err, err_size, "7z integrity test on the repacked .exe failed -- refusing to leave a broken installer "
@@ -382,7 +370,7 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
   }
 
   shell_quote(verify_dir, q2, sizeof(q2));
-  snprintf(cmd, sizeof(cmd), "mkdir -p %s && %s x -o%s %s -y >/dev/null", q2, sevenzip_path, q2, q1);
+  snprintf(cmd, sizeof(cmd), "if not exist %s mkdir %s && %s x -o%s %s -y >nul", q2, q2, sevenzip_path, q2, q1);
   if (system(cmd) != 0)
   {
     set_err(err, err_size, "round-trip FAILED: couldn't extract the repacked .exe for verification");

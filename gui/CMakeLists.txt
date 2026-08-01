@@ -59,28 +59,62 @@ target_include_directories(nam_gui_core PUBLIC ${LZMA_INCLUDE_DIR})
 target_link_libraries(nam_gui_core PUBLIC ${LZMA_LIBRARY})
 
 # e2fsprogs (libext2fs) -- replaces the debugfs/e2fsck CLI shell-outs
-# build_update_img.py uses. No .pc file on Homebrew, so search common
-# keg/system locations directly; override with -DE2FSPROGS_ROOT=... if
-# yours lives elsewhere (e.g. a Linux distro package, or the docker/ image).
-find_path(E2FSPROGS_INCLUDE_DIR ext2fs/ext2fs.h
-  HINTS ${E2FSPROGS_ROOT}
-  PATHS /opt/homebrew/opt/e2fsprogs /usr/local/opt/e2fsprogs /usr
-  PATH_SUFFIXES include
-)
-foreach(_lib ext2fs e2p com_err blkid uuid)
-  find_library(E2FSPROGS_${_lib}_LIBRARY
-    NAMES ${_lib}
+# build_update_img.py uses.
+if(WIN32)
+  # No vcpkg or MSYS2/MinGW binary package for libext2fs exists (checked
+  # both indexes) -- but the e2fsprogs SOURCE builds cleanly for mingw-w64
+  # (confirmed by actually building it, not just reading configure.ac,
+  # which already special-cases `mingw*` hosts -- see
+  # core/ext4_image.c's use of default_io_manager instead of a hardcoded
+  # unix_io_manager). Built once per fresh checkout via
+  # gui/scripts/build_e2fsprogs_windows.sh, same "build on the fly, never
+  # commit" philosophy as gui/blobs/* above. Requires a bash + a C
+  # compiler capable of building for mingw-w64 (e.g. run this from an
+  # MSYS2 MinGW64 shell, which provides both natively).
+  set(E2FSPROGS_WIN_PREFIX ${CMAKE_SOURCE_DIR}/build/e2fsprogs-windows)
+  if(NOT EXISTS ${E2FSPROGS_WIN_PREFIX}/lib/libext2fs.a)
+    message(STATUS "Building e2fsprogs libraries for Windows (mingw-w64) -- this takes a few minutes...")
+    execute_process(
+      COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/build_e2fsprogs_windows.sh ${E2FSPROGS_WIN_PREFIX}
+      RESULT_VARIABLE E2FSPROGS_WIN_BUILD_RESULT
+    )
+    if(NOT E2FSPROGS_WIN_BUILD_RESULT EQUAL 0)
+      message(FATAL_ERROR "Building e2fsprogs for Windows failed -- see gui/scripts/build_e2fsprogs_windows.sh "
+                           "(needs bash + a mingw-w64-capable C compiler, e.g. an MSYS2 MinGW64 shell).")
+    endif()
+  endif()
+  set(E2FSPROGS_INCLUDE_DIR ${E2FSPROGS_WIN_PREFIX}/include)
+  set(E2FSPROGS_LIBRARIES
+    ${E2FSPROGS_WIN_PREFIX}/lib/libext2fs.a
+    ${E2FSPROGS_WIN_PREFIX}/lib/libe2p.a
+    ${E2FSPROGS_WIN_PREFIX}/lib/libcom_err.a
+    ${E2FSPROGS_WIN_PREFIX}/lib/libblkid.a
+    ${E2FSPROGS_WIN_PREFIX}/lib/libuuid.a
+  )
+else()
+  # No .pc file on Homebrew, so search common keg/system locations
+  # directly; override with -DE2FSPROGS_ROOT=... if yours lives elsewhere
+  # (e.g. a Linux distro package, or the docker/ image).
+  find_path(E2FSPROGS_INCLUDE_DIR ext2fs/ext2fs.h
     HINTS ${E2FSPROGS_ROOT}
     PATHS /opt/homebrew/opt/e2fsprogs /usr/local/opt/e2fsprogs /usr
-    PATH_SUFFIXES lib
+    PATH_SUFFIXES include
   )
-  list(APPEND E2FSPROGS_LIBRARIES ${E2FSPROGS_${_lib}_LIBRARY})
-endforeach()
+  foreach(_lib ext2fs e2p com_err blkid uuid)
+    find_library(E2FSPROGS_${_lib}_LIBRARY
+      NAMES ${_lib}
+      HINTS ${E2FSPROGS_ROOT}
+      PATHS /opt/homebrew/opt/e2fsprogs /usr/local/opt/e2fsprogs /usr
+      PATH_SUFFIXES lib
+    )
+    list(APPEND E2FSPROGS_LIBRARIES ${E2FSPROGS_${_lib}_LIBRARY})
+  endforeach()
 
-if(NOT E2FSPROGS_INCLUDE_DIR OR NOT E2FSPROGS_ext2fs_LIBRARY)
-  message(FATAL_ERROR "libext2fs (e2fsprogs) not found -- macOS: brew install e2fsprogs; "
-                       "Debian/Ubuntu: apt install e2fslibs-dev (or e2fsprogs-dev/uuid-dev as "
-                       "needed for your distro); or pass -DE2FSPROGS_ROOT=/path/to/e2fsprogs.")
+  if(NOT E2FSPROGS_INCLUDE_DIR OR NOT E2FSPROGS_ext2fs_LIBRARY)
+    message(FATAL_ERROR "libext2fs (e2fsprogs) not found -- macOS: brew install e2fsprogs; "
+                         "Debian/Ubuntu: apt install e2fslibs-dev (or e2fsprogs-dev/uuid-dev as "
+                         "needed for your distro); or pass -DE2FSPROGS_ROOT=/path/to/e2fsprogs.")
+  endif()
 endif()
 
 target_include_directories(nam_gui_core PUBLIC ${E2FSPROGS_INCLUDE_DIR})

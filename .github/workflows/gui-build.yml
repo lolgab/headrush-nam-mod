@@ -5,13 +5,14 @@ name: gui build
 # blobs depend on), and uploads the resulting binaries as release assets
 # on version tags.
 #
-# Windows is deliberately NOT built here yet: gui/tools/gui_core_cli.c and
-# gui/app/main.c both use mkdtemp()/<unistd.h> (POSIX-only) for their work
-# directory, which doesn't exist on real Windows -- see gui/app/main.c's
-# own top comment. gui/app/win_repack.c's *logic* is already validated
-# (see gui/README.md), but the app itself needs a Windows-compatible temp
-# directory before it can compile there at all. Add a windows-latest job
-# here once that lands.
+# Windows builds under MSYS2's MINGW64 environment (native mingw-w64 gcc,
+# not the MSYS POSIX layer -- produces a normal Windows .exe depending
+# only on the mingw-w64 runtime). curl/xz/SDL2 all have ready-made
+# mingw-w64-x86_64-* MSYS2 packages; libext2fs does not (no vcpkg or
+# MSYS2 package exists), so gui/scripts/build_e2fsprogs_windows.sh builds
+# it from source instead -- confirmed to actually work by cross-compiling
+# it for mingw-w64 in Docker before writing that script (see
+# gui/README.md's verification section).
 on:
   push:
     branches: [main]
@@ -121,9 +122,59 @@ jobs:
             gui/build/gui-core-cli
             gui/build/headrush-nam-gui
 
+  build-windows:
+    needs: build-blobs
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-curl
+            mingw-w64-x86_64-xz
+            mingw-w64-x86_64-SDL2
+            p7zip
+            make
+            tar
+            curl
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nam-blobs
+          path: gui/blobs
+
+      - run: touch gui/blobs/*
+
+      # No vcpkg/MSYS2 package for libext2fs exists -- build it from
+      # source once (see the script's own header comment for why this is
+      # known to actually work, not just hoped to).
+      - name: Build e2fsprogs for Windows
+        run: ./gui/scripts/build_e2fsprogs_windows.sh
+
+      - name: Build
+        run: |
+          cmake -S gui -B gui/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build gui/build --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: headrush-nam-gui-windows
+          path: |
+            gui/build/gui-core-cli.exe
+            gui/build/headrush-nam-gui.exe
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-linux, build-macos]
+    needs: [build-linux, build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write

@@ -13,9 +13,10 @@ result -- no terminal needed:
   GUI. Just double-click it like the official updater.
 - **Windows**: a patched, repacked copy of the 7z-SFX `.exe` updater
   (milestone 5) -- same behavior as `scripts/repack_windows_updater.py`,
-  just via a GUI. The repack *logic* is thoroughly validated (see below)
-  but this GUI hasn't actually been compiled/run on a real Windows host
-  yet in this repo -- see app/main.c's own top comment for what's left.
+  just via a GUI. Builds under MSYS2's MINGW64 environment (CI does this
+  for real -- see the Windows CI section below); `core/ext4_image.c`'s
+  libext2fs dependency, once thought to have no Windows story at all, is
+  built from source for mingw-w64 by `gui/scripts/build_e2fsprogs_windows.sh`.
 - **Other OSes**: a plain `Update_nam.img` (milestone 3's "simplest output
   path", same as `scripts/quickstart_linux.sh`).
 
@@ -76,6 +77,10 @@ result -- no terminal needed:
 - `scripts/build_blobs.sh` / `scripts/build_blobs_native.sh` (milestone 6)
   -- rebuild `blobs/*` (see above); `../.github/workflows/gui-build.yml`
   runs the same `_native.sh` script in CI.
+- `scripts/build_e2fsprogs_windows.sh` -- builds the 5 e2fsprogs libraries
+  (`com_err`/`ext2fs`/`e2p`/`uuid`/`blkid`) for a Windows (mingw-w64)
+  target from source (no vcpkg/MSYS2 package exists); run automatically
+  by `gui/CMakeLists.txt` on `WIN32`. See "Full Windows support" below.
 
 ## Building
 
@@ -268,11 +273,64 @@ invalid input, confirm no leftover directory) and the GUI app (launches,
 runs, exits cleanly) after the refactor, and re-ran the full Linux Docker
 build to confirm no regression from either this or the libm fix above.
 
-This closes ONE of the two real gaps blocking a Windows build. The other
--- `core/ext4_image.c`'s dependency on libext2fs -- remains open and is
-larger: confirmed (via both the vcpkg ports index and the MSYS2/MinGW
-package index -- neither lists it) that no ready-made Windows port of
-libext2fs exists. `app/win_repack.c`'s repack *logic* is already validated
-(milestone 5 above) and is otherwise Windows-ready; the GUI app as a whole
-still cannot compile for real Windows until libext2fs is addressed, so
-no `windows-latest` CI job has been added yet.
+This closed one of the two real gaps blocking a Windows build. The other
+-- see the next section -- turned out to be solvable too.
+
+### Full Windows support: libext2fs for mingw-w64
+
+No vcpkg or MSYS2/MinGW *binary package* for libext2fs exists (checked
+both indexes -- still true). But that only means no one has packaged a
+prebuilt binary, not that the source can't build for Windows -- and it
+turns out it can: `configure.ac` already special-cases `mingw*` hosts,
+automatically selecting `windows_io.c` (a real Win32 `CreateFile`/
+`ReadFile`/`WriteFile`-based I/O backend that already ships in upstream
+e2fsprogs) as `default_io_manager` instead of `unix_io.c`. This was
+discovered, not assumed: cross-compiled e2fsprogs 1.47.1 for
+`x86_64-w64-mingw32` in Docker (`gcc-mingw-w64-x86-64-posix`) before
+writing a single line of integration code, and all 5 libraries this
+project actually needs built clean: `libcom_err`, `libext2fs`, `libe2p`,
+`libuuid`, `libblkid` -- confirmed the resulting `.a` files are genuine
+PE/COFF Windows objects (`x86_64-w64-mingw32-nm` parses them correctly).
+
+Only `lib/ss` (the interactive command-subsystem library `debugfs`'s own
+shell uses -- `fork()`/`wait()`/`sigprocmask()`/`sigset_t`, none of which
+exist on Windows) fails to build, and it doesn't matter: this project
+never links `lib/ss` at all, it only calls `ext2fs_*` functions directly.
+`gui/scripts/build_e2fsprogs_windows.sh` builds exactly the 5 needed
+subdirectories (`make -C lib/XXX && make -C lib/XXX install`, never the
+top-level recursive `install`/`install-libs`, which does try to touch
+`lib/ss` and fails) -- validated by running the actual script end-to-end
+in Docker, not just the manual commands that led to it.
+
+`core/ext4_image.c` changed from hardcoding `unix_io_manager` to
+`default_io_manager` (a portable `#ifdef _WIN32` macro already provided by
+e2fsprogs' own `ext2_io.h` -- one line, no platform branching needed in
+our own code at all).
+
+`app/win_repack.c`'s `system()` calls were rewritten for real `cmd.exe`
+syntax (this file only ever compiles for `_WIN32`, so no dual-path
+abstraction is needed): double-quoted paths instead of single-quoted
+(`cmd.exe` has no single-quote quoting at all), `if not exist X mkdir X`
+instead of `mkdir -p` (Windows' `mkdir` has no `-p` flag and errors on an
+already-existing directory, unlike POSIX), `>nul` instead of
+`>/dev/null`, `cd /d` instead of bare `cd` (handles a different drive
+letter correctly).
+
+`.github/workflows/gui-build.yml`'s `build-windows` job builds under
+MSYS2's **MINGW64** environment (`msys2/setup-msys2`, `msystem: MINGW64`)
+-- native mingw-w64 gcc, producing a normal Windows `.exe` that depends
+only on the mingw-w64 runtime, not MSYS's own POSIX emulation layer.
+`curl`/`xz`/`SDL2` all have ready-made `mingw-w64-x86_64-*` packages;
+`gui/scripts/build_e2fsprogs_windows.sh` runs directly in that same shell
+to provide the one library that doesn't. `gui/CMakeLists.txt` builds it
+automatically on `WIN32` the same "build once per checkout, never commit"
+way `gui/blobs/*` already works.
+
+**What's verified**: every individual piece above (e2fsprogs cross-compile,
+the exact build script, the `default_io_manager` fix rebuilt clean on
+macOS/Linux with no regression). **What's not yet verified**: an actual
+`windows-latest` GitHub Actions run of the full `build-windows` job --
+`act` cannot emulate `windows-latest` locally, so this is the one piece
+whose first real test is the next real push. If MSYS2 package names or
+generator choice need adjusting, that's exactly the kind of thing a real
+run surfaces quickly (same pattern as the Linux `-lm` link failure above).

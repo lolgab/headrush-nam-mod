@@ -43,7 +43,10 @@ bool nam_ext4_open(const char* path, bool read_write, Ext4Image** out, char* err
   }
   img->read_write = read_write;
 
-  errcode_t retval = ext2fs_open(path, read_write ? EXT2_FLAG_RW : 0, 0, 0, unix_io_manager, &img->fs);
+  /* default_io_manager resolves to unix_io_manager or windows_io_manager
+   * (ext2_io.h, #ifdef _WIN32) -- e2fsprogs's own portable pick, not
+   * something we need to branch on ourselves. */
+  errcode_t retval = ext2fs_open(path, read_write ? EXT2_FLAG_RW : 0, 0, 0, default_io_manager, &img->fs);
   if (retval)
   {
     set_err_code(err, err_size, retval, "opening ext4 image");
