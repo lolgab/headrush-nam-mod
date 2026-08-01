@@ -112,10 +112,11 @@ PAGE = 0x1000
 
 # The two values that vary per `Evil` are CLI args (--engine-vtable, --orig-fn);
 # their defaults are the HeadRush Pedalboard 2.7 values, so a bare invocation is
-# unchanged, and build_update_img.py passes per-model overrides (see
-# scripts/model_targets.py). PROCESS_SLOT and VADDR_BASE are the same for every
-# supported Evil (same DSPModule<AnxietyOD,...> class / ELF layout), so they're
-# fixed constants here rather than per-model.
+# unchanged, and the build passes per-model overrides (see model_targets.py,
+# now reimplemented in core/model_targets.c for the shipped GUI build).
+# PROCESS_SLOT and VADDR_BASE are the same for every supported Evil (same
+# DSPModule<AnxietyOD,...> class / ELF layout), so they're fixed constants
+# here rather than per-model.
 DEFAULT_ENGINE_VTABLE = 0x1839044  # AnxietyOD engine object's real vtable address-point
 DEFAULT_ORIG_FN = 0x3260e0         # value the slot holds pre-patch (real process())
 PROCESS_SLOT = 8                   # process() index in the engine vtable

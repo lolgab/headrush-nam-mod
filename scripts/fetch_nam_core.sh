@@ -3,7 +3,7 @@
 # as plain source downloaded straight from GitHub/GitLab as tarballs, no git
 # submodules or even git itself needed.
 #
-# Only what the build actually uses (see build_update_img.py) is fetched:
+# Only what the build actually uses (see scripts/build_blobs_native.sh) is fetched:
 # NAM/*.cpp + NAM/wavenet/*.cpp + headers, Dependencies/nlohmann (vendored
 # in the NeuralAmpModelerCore repo itself, not its own submodule), and
 # Dependencies/eigen (header-only). NeuralAmpModelerCore's own

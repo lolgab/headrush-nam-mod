@@ -4,7 +4,7 @@ patch_modfac_spy.py -- pure-observer spy on ModFac_construct's pedal-type
 dispatch, logging which type index gets constructed without changing
 behavior at all.
 
-STATUS: NOT applied by build_update_img.py -- dormant, kept as reference.
+STATUS: NOT applied by the build -- dormant, kept as reference.
 The dispatch site (vaddr 0x209be4) sits deep inside a ~22MB .text section
 with no code cave anywhere near it. ARM's B/BL instruction (the only
 single-instruction way to replace the one 4-byte `cmp r1,#0x5b` slot we're

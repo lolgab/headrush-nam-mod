@@ -55,11 +55,11 @@ import argparse
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import model_targets  # noqa: E402
 
 # Pedalboard 2.7 renames (default). Other models pull their own from
-# scripts/model_targets.py via --model; a model with qml_renames=None (e.g. MX5
+# model_targets.py via --model; a model with qml_renames=None (e.g. MX5
 # or Gigboard, whose knob labels come from a shared string pool) has no
 # per-pedal target and should not be run through this script at all.
 RENAMES = model_targets.PEDALBOARD_2_7.qml_renames

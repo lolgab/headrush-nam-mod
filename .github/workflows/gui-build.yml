@@ -1,7 +1,7 @@
 name: gui build
 
 # Milestone 6 (see .claude/plans/crystalline-baking-moonbeam.md): builds
-# gui/ on every push/PR touching it (or the patch/nam_core sources its
+# the GUI on every push/PR touching it (or the patch/nam_core sources its
 # blobs depend on), and uploads the resulting binaries as release assets
 # on version tags.
 #
@@ -9,30 +9,40 @@ name: gui build
 # not the MSYS POSIX layer -- produces a normal Windows .exe depending
 # only on the mingw-w64 runtime). curl/xz/SDL2 all have ready-made
 # mingw-w64-x86_64-* MSYS2 packages; libext2fs does not (no vcpkg or
-# MSYS2 package exists), so gui/scripts/build_e2fsprogs_windows.sh builds
+# MSYS2 package exists), so scripts/build_e2fsprogs_windows.sh builds
 # it from source instead -- confirmed to actually work by cross-compiling
 # it for mingw-w64 in Docker before writing that script (see
-# gui/README.md's verification section).
+# docs/BUILDING.md's verification section).
 on:
   push:
     branches: [main]
     paths:
-      - "gui/**"
+      - "core/**"
+      - "app/**"
+      - "tools/**"
+      - "third_party/**"
+      - "scripts/**"
+      - "CMakeLists.txt"
       - "patch/**"
       - ".github/workflows/gui-build.yml"
     tags:
       - "v*"
   pull_request:
     paths:
-      - "gui/**"
+      - "core/**"
+      - "app/**"
+      - "tools/**"
+      - "third_party/**"
+      - "scripts/**"
+      - "CMakeLists.txt"
       - "patch/**"
       - ".github/workflows/gui-build.yml"
 
 jobs:
-  # Cross-compiles gui/blobs/*: no Docker needed in CI (unlike local dev,
-  # see gui/scripts/build_blobs.sh) since the runner OS is already Linux --
+  # Cross-compiles blobs/*: no Docker needed in CI (unlike local dev,
+  # see scripts/build_blobs.sh) since the runner OS is already Linux --
   # just install the same Bootlin ARM toolchain docker/Dockerfile uses and
-  # run gui/scripts/build_blobs_native.sh directly.
+  # run scripts/build_blobs_native.sh directly.
   build-blobs:
     runs-on: ubuntu-latest
     steps:
@@ -50,12 +60,12 @@ jobs:
           echo "/opt/toolchain/bin" >> "$GITHUB_PATH"
 
       - name: Build blobs
-        run: ./gui/scripts/build_blobs_native.sh
+        run: ./scripts/build_blobs_native.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: nam-blobs
-          path: gui/blobs/
+          path: blobs/
           retention-days: 7
 
   build-linux:
@@ -73,26 +83,26 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nam-blobs
-          path: gui/blobs
+          path: blobs
 
       # Guarantee the downloaded blobs' mtimes are newer than the freshly
       # checked-out sources, so CMake's staleness check (see
-      # gui/CMakeLists.txt's add_custom_command) doesn't try to rebuild
+      # CMakeLists.txt's add_custom_command) doesn't try to rebuild
       # them via Docker here (there's no Docker daemon on this runner
       # anyway -- see build-blobs above for why this job doesn't need it).
-      - run: touch gui/blobs/*
+      - run: touch blobs/*
 
       - name: Build
         run: |
-          cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build gui/build --target headrush-nam-gui --parallel
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target headrush-nam-gui --parallel
 
-      - run: mv gui/build/headrush-nam-gui gui/build/headrush-nam-gui-linux
+      - run: mv build/headrush-nam-gui build/headrush-nam-gui-linux
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-linux
-          path: gui/build/headrush-nam-gui-linux
+          path: build/headrush-nam-gui-linux
 
   # macos-latest is an Apple Silicon (arm64) runner, so getting a real
   # x86_64 build too (for Intel Macs) means building twice and lipo-ing the
@@ -104,7 +114,7 @@ jobs:
   # transparently produces genuine x86_64 objects with no cross-compile
   # flags needed.
   #
-  # Once both Homebrew prefixes exist side by side, gui/CMakeLists.txt's
+  # Once both Homebrew prefixes exist side by side, CMakeLists.txt's
   # find_path/find_library calls for curl/lzma/e2fsprogs/SDL2 can resolve
   # to EITHER arch's dylib (their PATHS lists check both
   # /opt/homebrew/opt/<pkg> and /usr/local/opt/<pkg>, for regular
@@ -128,17 +138,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nam-blobs
-          path: gui/blobs
+          path: blobs
 
-      - run: touch gui/blobs/*
+      - run: touch blobs/*
 
       - name: Install arm64 dependencies
         run: brew install e2fsprogs xz curl sdl2
 
       - name: Build (arm64, native)
         run: |
-          cmake -S gui -B gui/build-arm64 -DCMAKE_BUILD_TYPE=Release
-          cmake --build gui/build-arm64 --target headrush-nam-gui --parallel
+          cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-arm64 --target headrush-nam-gui --parallel
 
       - name: Install Rosetta 2
         run: softwareupdate --install-rosetta --agree-to-license || true
@@ -159,7 +169,7 @@ jobs:
           # binary, so the `arch -x86_64` wrapper here still matters -- it's
           # inherited by the whole child process tree, including those
           # compiler invocations.
-          arch -x86_64 /usr/local/bin/cmake -S gui -B gui/build-x86_64 -DCMAKE_BUILD_TYPE=Release \
+          arch -x86_64 /usr/local/bin/cmake -S . -B build-x86_64 -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON \
             -DCURL_INCLUDE_DIR=/usr/local/opt/curl/include \
             -DCURL_LIBRARY=/usr/local/opt/curl/lib/libcurl.dylib \
@@ -173,18 +183,18 @@ jobs:
             -DE2FSPROGS_uuid_LIBRARY=/usr/local/opt/e2fsprogs/lib/libuuid.a \
             -DSDL2_INCLUDE_DIRS=/usr/local/include/SDL2 \
             -DSDL2_LIBRARIES=/usr/local/lib/libSDL2.dylib
-          arch -x86_64 /usr/local/bin/cmake --build gui/build-x86_64 --target headrush-nam-gui --parallel
+          arch -x86_64 /usr/local/bin/cmake --build build-x86_64 --target headrush-nam-gui --parallel
 
       - name: Create universal binary
         run: |
-          lipo -create -output gui/build-arm64/headrush-nam-gui-macos \
-            gui/build-arm64/headrush-nam-gui gui/build-x86_64/headrush-nam-gui
-          lipo -info gui/build-arm64/headrush-nam-gui-macos
+          lipo -create -output build-arm64/headrush-nam-gui-macos \
+            build-arm64/headrush-nam-gui build-x86_64/headrush-nam-gui
+          lipo -info build-arm64/headrush-nam-gui-macos
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-macos
-          path: gui/build-arm64/headrush-nam-gui-macos
+          path: build-arm64/headrush-nam-gui-macos
 
   build-windows:
     needs: build-blobs
@@ -214,27 +224,27 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nam-blobs
-          path: gui/blobs
+          path: blobs
 
-      - run: touch gui/blobs/*
+      - run: touch blobs/*
 
       # No vcpkg/MSYS2 package for libext2fs exists -- build it from
       # source once (see the script's own header comment for why this is
       # known to actually work, not just hoped to).
       - name: Build e2fsprogs for Windows
-        run: ./gui/scripts/build_e2fsprogs_windows.sh
+        run: ./scripts/build_e2fsprogs_windows.sh
 
       - name: Build
         run: |
-          cmake -S gui -B gui/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build gui/build --target headrush-nam-gui --parallel
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --target headrush-nam-gui --parallel
 
-      - run: mv gui/build/headrush-nam-gui.exe gui/build/headrush-nam-gui-windows.exe
+      - run: mv build/headrush-nam-gui.exe build/headrush-nam-gui-windows.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-windows
-          path: gui/build/headrush-nam-gui-windows.exe
+          path: build/headrush-nam-gui-windows.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
