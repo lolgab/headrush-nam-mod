@@ -83,12 +83,20 @@ if(WIN32)
                            "(needs bash + a mingw-w64-capable C compiler, e.g. an MSYS2 MinGW64 shell).")
     endif()
   endif()
-  # include-mingw-compat MUST come before include/ on the search path:
-  # it's e2fsprogs' own mingw compat header set (typedefs dev_t etc to
-  # match what libext2fs.a was actually compiled against) -- see
-  # build_e2fsprogs_windows.sh's own comment on why this is required, not
-  # optional, for a Windows build.
-  set(E2FSPROGS_INCLUDE_DIR ${E2FSPROGS_WIN_PREFIX}/include-mingw-compat ${E2FSPROGS_WIN_PREFIX}/include)
+  # NOTE: include-mingw-compat is deliberately NOT added to
+  # E2FSPROGS_INCLUDE_DIR (which is PUBLIC on the whole nam_gui_core
+  # target). It's e2fsprogs' own private mingw compat header set --
+  # it ships its OWN sys/stat.h, sys/types.h, unistd.h etc, and putting
+  # it target-wide shadows the REAL mingw-w64 system headers for every
+  # other source file, breaking stat()/_wstat64/struct stat in
+  # third_party/miniz and app/win_repack.c. Confirmed the hard way: a
+  # real windows-latest CI run compiled ext4_image.c fine but then broke
+  # miniz_zip.c and win_repack.c with "storage size of 'file_stat'/'st'
+  # isn't known" once this dir was on the global search path. Only
+  # ext4_image.c actually needs it (see the set_source_files_properties
+  # call below, right after ext2fs/ext2fs.h's own include is added).
+  set(E2FSPROGS_INCLUDE_DIR ${E2FSPROGS_WIN_PREFIX}/include)
+  set(E2FSPROGS_COMPAT_INCLUDE_DIR ${E2FSPROGS_WIN_PREFIX}/include-mingw-compat)
   set(E2FSPROGS_LIBRARIES
     ${E2FSPROGS_WIN_PREFIX}/lib/libext2fs.a
     ${E2FSPROGS_WIN_PREFIX}/lib/libe2p.a
@@ -107,7 +115,13 @@ if(WIN32)
   # unconditional standard headers ext2fs.h includes regardless
   # (stdio.h's own chain, on a real POSIX libc); mingw-w64 is the first
   # target where that coincidence doesn't hold.
-  target_compile_definitions(nam_gui_core PUBLIC HAVE_SYS_TYPES_H=1)
+  #
+  # Both this define and include-mingw-compat are scoped to ext4_image.c
+  # ONLY (the one file that includes ext2fs/ext2fs.h) -- see below.
+  set_source_files_properties(core/ext4_image.c PROPERTIES
+    COMPILE_DEFINITIONS "HAVE_SYS_TYPES_H=1"
+    COMPILE_OPTIONS "-I${E2FSPROGS_COMPAT_INCLUDE_DIR}"
+  )
 else()
   # No .pc file on Homebrew, so search common keg/system locations
   # directly; override with -DE2FSPROGS_ROOT=... if yours lives elsewhere
