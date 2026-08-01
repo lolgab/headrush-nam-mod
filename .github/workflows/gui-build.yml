@@ -140,13 +140,20 @@ jobs:
           if [ ! -x /usr/local/bin/brew ]; then
             arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
           fi
-          arch -x86_64 /usr/local/bin/brew install e2fsprogs xz curl sdl2
+          arch -x86_64 /usr/local/bin/brew install cmake e2fsprogs xz curl sdl2
 
       - name: Build (x86_64, under Rosetta)
         run: |
-          arch -x86_64 cmake -S gui -B gui/build-x86_64 -DCMAKE_BUILD_TYPE=Release \
+          # The system/PATH `cmake` here is arm64-only (no x86_64 slice --
+          # `arch -x86_64 cmake` fails with "Bad CPU type in executable"),
+          # so use the x86_64 Homebrew's own cmake explicitly. cc/clang
+          # (invoked by cmake/ninja as this runs) IS a universal Apple
+          # binary, so the `arch -x86_64` wrapper here still matters -- it's
+          # inherited by the whole child process tree, including those
+          # compiler invocations.
+          arch -x86_64 /usr/local/bin/cmake -S gui -B gui/build-x86_64 -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_IGNORE_PATH="/opt/homebrew/include;/opt/homebrew/lib;/opt/homebrew/opt/curl/include;/opt/homebrew/opt/curl/lib;/opt/homebrew/opt/xz/include;/opt/homebrew/opt/xz/lib;/opt/homebrew/opt/e2fsprogs/include;/opt/homebrew/opt/e2fsprogs/lib"
-          arch -x86_64 cmake --build gui/build-x86_64 --target headrush-nam-gui --parallel
+          arch -x86_64 /usr/local/bin/cmake --build gui/build-x86_64 --target headrush-nam-gui --parallel
 
       - name: Create universal binary
         run: |
