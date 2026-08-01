@@ -41,7 +41,14 @@ trap 'rm -rf "$WORK"' EXIT
 echo "Downloading e2fsprogs $E2FSPROGS_VERSION source..."
 curl -fsSL -o "$WORK/e2fsprogs.tar.gz" \
     "https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$E2FSPROGS_VERSION/e2fsprogs-$E2FSPROGS_VERSION.tar.gz"
-tar -xzf "$WORK/e2fsprogs.tar.gz" -C "$WORK"
+
+# --exclude the one symlink in the whole tarball (RELEASE-NOTES ->
+# doc/RelNotes/v1.47.0.txt, doc-only, irrelevant to the build): creating
+# it fails under MSYS2's tar on NTFS without elevated/Developer-Mode
+# symlink privileges, which a stock GitHub Actions windows-latest runner
+# doesn't have -- confirmed for real (this exact failure is what a real
+# windows-latest CI run surfaced the first time this script ran there).
+tar --exclude="e2fsprogs-$E2FSPROGS_VERSION/RELEASE-NOTES" -xzf "$WORK/e2fsprogs.tar.gz" -C "$WORK"
 cd "$WORK/e2fsprogs-$E2FSPROGS_VERSION"
 
 CC_ARGS=()
