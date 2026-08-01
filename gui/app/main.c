@@ -160,6 +160,84 @@ static bool write_whole_file_local(const char* path, const uint8_t* data, size_t
   return ok;
 }
 
+/* Quotes `path` for a POSIX /bin/sh -c "..." command line (macOS/Linux):
+ * wraps in single quotes, escaping any embedded single quote as '\''. */
+static void posix_shell_quote(const char* path, char* out, size_t out_size)
+{
+  size_t o = 0;
+  if (o + 1 < out_size)
+    out[o++] = '\'';
+  for (const char* p = path; *p && o + 5 < out_size; ++p)
+  {
+    if (*p == '\'')
+    {
+      const char* rep = "'\\''";
+      while (*rep && o + 1 < out_size)
+        out[o++] = *rep++;
+    }
+    else
+      out[o++] = *p;
+  }
+  if (o + 1 < out_size)
+    out[o++] = '\'';
+  out[o < out_size ? o : out_size - 1] = '\0';
+}
+
+#ifdef _WIN32
+/* Quotes `path` for a cmd.exe command line: wraps in double quotes.
+ * Our own generated paths never contain embedded double quotes. */
+static void windows_shell_quote(const char* path, char* out, size_t out_size)
+{
+  snprintf(out, out_size, "\"%s\"", path);
+}
+#endif
+
+/* Opens `path` with the OS's default handler for it (the .app/.exe
+ * installer, or the plain .img on Linux -- whatever the OS does with it). */
+static void nam_open_path(const char* path)
+{
+  char quoted[1024];
+  char cmd[1200];
+#if defined(__APPLE__)
+  posix_shell_quote(path, quoted, sizeof(quoted));
+  snprintf(cmd, sizeof(cmd), "open %s", quoted);
+#elif defined(_WIN32)
+  windows_shell_quote(path, quoted, sizeof(quoted));
+  snprintf(cmd, sizeof(cmd), "start \"\" %s", quoted);
+#else
+  posix_shell_quote(path, quoted, sizeof(quoted));
+  snprintf(cmd, sizeof(cmd), "xdg-open %s", quoted);
+#endif
+  (void)system(cmd); /* best-effort UI convenience -- nothing to recover from if it fails */
+}
+
+/* Reveals `path` in the OS's file manager (Finder/Explorer), selecting it
+ * where the platform supports that; falls back to just opening the
+ * containing folder on Linux. */
+static void nam_reveal_path(const char* path)
+{
+  char quoted[1024];
+  char cmd[1200];
+#if defined(__APPLE__)
+  posix_shell_quote(path, quoted, sizeof(quoted));
+  snprintf(cmd, sizeof(cmd), "open -R %s", quoted);
+#elif defined(_WIN32)
+  windows_shell_quote(path, quoted, sizeof(quoted));
+  snprintf(cmd, sizeof(cmd), "explorer /select,%s", quoted);
+#else
+  char dir[900];
+  snprintf(dir, sizeof(dir), "%s", path);
+  char* slash = strrchr(dir, '/');
+  if (slash)
+    *slash = '\0';
+  else
+    snprintf(dir, sizeof(dir), ".");
+  posix_shell_quote(dir, quoted, sizeof(quoted));
+  snprintf(cmd, sizeof(cmd), "xdg-open %s", quoted);
+#endif
+  (void)system(cmd);
+}
+
 static int worker_main(void* data)
 {
   AppShared* shared = (AppShared*)data;
@@ -494,6 +572,11 @@ int main(int argc, char** argv)
         nk_layout_row_dynamic(ctx, 24, 1);
         nk_label(ctx, "on your device (device must be in firmware-update mode).", NK_TEXT_LEFT);
 #endif
+        nk_layout_row_dynamic(ctx, 30, 2);
+        if (nk_button_label(ctx, "Open"))
+          nam_open_path(path);
+        if (nk_button_label(ctx, "Open in Folder"))
+          nam_reveal_path(path);
       }
       else /* APP_STATE_ERROR */
       {
