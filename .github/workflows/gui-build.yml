@@ -102,14 +102,23 @@ jobs:
   # arm64 install at /opt/homebrew) -- `arch -x86_64` re-execs everything
   # (brew, cmake, the compiler) via their own x86_64 slices, which
   # transparently produces genuine x86_64 objects with no cross-compile
-  # flags needed. CMAKE_IGNORE_PATH on each pass keeps that pass from
-  # accidentally resolving find_path/find_library to the OTHER arch's
-  # dylibs -- gui/CMakeLists.txt's e2fsprogs/curl/lzma searches hardcode
-  # BOTH /opt/homebrew/opt/<pkg> and /usr/local/opt/<pkg> in their PATHS
-  # lists (for regular single-arch dev machines), so both are on disk
-  # simultaneously here and would otherwise silently pick whichever ends
-  # up first, which can fail to link (or worse, not fail) depending on
-  # search order.
+  # flags needed.
+  #
+  # Once both Homebrew prefixes exist side by side, gui/CMakeLists.txt's
+  # find_path/find_library calls for curl/lzma/e2fsprogs/SDL2 can resolve
+  # to EITHER arch's dylib (their PATHS lists check both
+  # /opt/homebrew/opt/<pkg> and /usr/local/opt/<pkg>, for regular
+  # single-arch dev machines). CMAKE_IGNORE_PATH does NOT reliably filter
+  # this -- confirmed the hard way: a real macos-latest run still linked
+  # /opt/homebrew's arm64 libSDL2 into the "x86_64" build via
+  # find_package(SDL2)'s own resolution despite CMAKE_IGNORE_PATH listing
+  # every /opt/homebrew path involved. Fix: preset every dependency
+  # variable explicitly via -D on the x86_64 configure line (plus
+  # -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON to force SDL2's find_package
+  # short-circuit off, so the manual find_path/find_library fallback runs)
+  # -- CMake never re-searches a variable already present in the cache, so
+  # this is fully deterministic regardless of what's on disk at either
+  # prefix.
   build-macos:
     needs: build-blobs
     runs-on: macos-latest
@@ -128,8 +137,7 @@ jobs:
 
       - name: Build (arm64, native)
         run: |
-          cmake -S gui -B gui/build-arm64 -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PATH="/usr/local/include;/usr/local/lib;/usr/local/opt/curl/include;/usr/local/opt/curl/lib;/usr/local/opt/xz/include;/usr/local/opt/xz/lib;/usr/local/opt/e2fsprogs/include;/usr/local/opt/e2fsprogs/lib"
+          cmake -S gui -B gui/build-arm64 -DCMAKE_BUILD_TYPE=Release
           cmake --build gui/build-arm64 --target headrush-nam-gui --parallel
 
       - name: Install Rosetta 2
@@ -152,7 +160,19 @@ jobs:
           # inherited by the whole child process tree, including those
           # compiler invocations.
           arch -x86_64 /usr/local/bin/cmake -S gui -B gui/build-x86_64 -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_IGNORE_PATH="/opt/homebrew/include;/opt/homebrew/lib;/opt/homebrew/opt/curl/include;/opt/homebrew/opt/curl/lib;/opt/homebrew/opt/xz/include;/opt/homebrew/opt/xz/lib;/opt/homebrew/opt/e2fsprogs/include;/opt/homebrew/opt/e2fsprogs/lib"
+            -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON \
+            -DCURL_INCLUDE_DIR=/usr/local/opt/curl/include \
+            -DCURL_LIBRARY=/usr/local/opt/curl/lib/libcurl.dylib \
+            -DLZMA_INCLUDE_DIR=/usr/local/opt/xz/include \
+            -DLZMA_LIBRARY=/usr/local/opt/xz/lib/liblzma.dylib \
+            -DE2FSPROGS_INCLUDE_DIR=/usr/local/opt/e2fsprogs/include \
+            -DE2FSPROGS_ext2fs_LIBRARY=/usr/local/opt/e2fsprogs/lib/libext2fs.a \
+            -DE2FSPROGS_e2p_LIBRARY=/usr/local/opt/e2fsprogs/lib/libe2p.a \
+            -DE2FSPROGS_com_err_LIBRARY=/usr/local/opt/e2fsprogs/lib/libcom_err.a \
+            -DE2FSPROGS_blkid_LIBRARY=/usr/local/opt/e2fsprogs/lib/libblkid.a \
+            -DE2FSPROGS_uuid_LIBRARY=/usr/local/opt/e2fsprogs/lib/libuuid.a \
+            -DSDL2_INCLUDE_DIRS=/usr/local/include/SDL2 \
+            -DSDL2_LIBRARIES=/usr/local/lib/libSDL2.dylib
           arch -x86_64 /usr/local/bin/cmake --build gui/build-x86_64 --target headrush-nam-gui --parallel
 
       - name: Create universal binary
