@@ -1,0 +1,148 @@
+name: gui build
+
+# Milestone 6 (see .claude/plans/crystalline-baking-moonbeam.md): builds
+# gui/ on every push/PR touching it (or the patch/nam_core sources its
+# blobs depend on), and uploads the resulting binaries as release assets
+# on version tags.
+#
+# Windows is deliberately NOT built here yet: gui/tools/gui_core_cli.c and
+# gui/app/main.c both use mkdtemp()/<unistd.h> (POSIX-only) for their work
+# directory, which doesn't exist on real Windows -- see gui/app/main.c's
+# own top comment. gui/app/win_repack.c's *logic* is already validated
+# (see gui/README.md), but the app itself needs a Windows-compatible temp
+# directory before it can compile there at all. Add a windows-latest job
+# here once that lands.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "gui/**"
+      - "patch/**"
+      - ".github/workflows/gui-build.yml"
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "gui/**"
+      - "patch/**"
+      - ".github/workflows/gui-build.yml"
+
+jobs:
+  # Cross-compiles gui/blobs/*: no Docker needed in CI (unlike local dev,
+  # see gui/scripts/build_blobs.sh) since the runner OS is already Linux --
+  # just install the same Bootlin ARM toolchain docker/Dockerfile uses and
+  # run gui/scripts/build_blobs_native.sh directly.
+  build-blobs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch nam_core
+        run: ./scripts/fetch_nam_core.sh
+
+      - name: Install ARM cross-toolchain (Bootlin, glibc 2.31 -- matches docker/Dockerfile)
+        run: |
+          set -euo pipefail
+          TOOLCHAIN_URL=https://toolchains.bootlin.com/downloads/releases/toolchains/armv7-eabihf/tarballs/armv7-eabihf--glibc--stable-2020.08-1.tar.bz2
+          sudo mkdir -p /opt/toolchain
+          curl -fsSL "$TOOLCHAIN_URL" | sudo tar -xj -C /opt/toolchain --strip-components=1
+          echo "/opt/toolchain/bin" >> "$GITHUB_PATH"
+
+      - name: Build blobs
+        run: ./gui/scripts/build_blobs_native.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nam-blobs
+          path: gui/blobs/
+          retention-days: 7
+
+  build-linux:
+    needs: build-blobs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            e2fslibs-dev liblzma-dev libcurl4-openssl-dev libsdl2-dev
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nam-blobs
+          path: gui/blobs
+
+      # Guarantee the downloaded blobs' mtimes are newer than the freshly
+      # checked-out sources, so CMake's staleness check (see
+      # gui/CMakeLists.txt's add_custom_command) doesn't try to rebuild
+      # them via Docker here (there's no Docker daemon on this runner
+      # anyway -- see build-blobs above for why this job doesn't need it).
+      - run: touch gui/blobs/*
+
+      - name: Build
+        run: |
+          cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build gui/build --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: headrush-nam-gui-linux
+          path: |
+            gui/build/gui-core-cli
+            gui/build/headrush-nam-gui
+
+  build-macos:
+    needs: build-blobs
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install e2fsprogs xz curl sdl2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nam-blobs
+          path: gui/blobs
+
+      - run: touch gui/blobs/*
+
+      - name: Build
+        run: |
+          cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build gui/build --parallel
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: headrush-nam-gui-macos
+          path: |
+            gui/build/gui-core-cli
+            gui/build/headrush-nam-gui
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: headrush-nam-gui-*
+          path: artifacts
+          merge-multiple: false
+
+      - name: Package per-platform archives
+        run: |
+          set -euxo pipefail
+          cd artifacts
+          for dir in headrush-nam-gui-*; do
+            chmod +x "$dir"/* || true
+            tar -czf "../${dir}.tar.gz" -C "$dir" .
+          done
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz"

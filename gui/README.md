@@ -1,4 +1,4 @@
-# gui/ -- portable NAM-mod installer (milestones 1, 3, 4, 5)
+# gui/ -- portable NAM-mod installer (milestones 1, 3, 4, 5, 6)
 
 Plain C (C11) reimplementation of `scripts/build_update_img.py`'s patch
 pipeline, with no external CLI dependencies (`debugfs`, `e2fsck`, `xz`,
@@ -25,13 +25,19 @@ result -- no terminal needed:
   `elf_patch` (Anxiety OD vtable hijack), `qml_patch` (knob relabel),
   `ext4_image` (libext2fs-backed dump/inject/verify), `xz_codec`
   (liblzma-backed compress/decompress), `launcher_script`, `model_targets`.
-- `blobs/` -- prebuilt `libnam_hook.so` / `libnam_preload.so` /
-  `trampoline_gonk.bin`, built once from `patch/*.cpp` via the ARM
-  cross-toolchain (see `scripts/build_update_img.py`'s `build_nam_libs()`
-  for the exact flags). These never depend on user input -- only on
-  `patch/*.cpp` -- so end users never need the ARM toolchain themselves.
-  Currently checked in from a manual build; a CI job that rebuilds these
-  whenever `patch/*.cpp` changes is a later milestone.
+- `blobs/` -- `libnam_hook.so` / `libnam_preload.so` / `trampoline_gonk.bin`,
+  cross-compiled from `patch/*.cpp` (same flags as
+  `scripts/build_update_img.py`'s `build_nam_libs()`). These never depend
+  on user input -- only on `patch/*.cpp` -- so end users never need the ARM
+  toolchain themselves. **Pure build artifacts, deliberately NOT committed
+  to git** (the repo's own root `.gitignore` already excludes `*.so`/
+  `*.bin`): CMake rebuilds them automatically via `gui/scripts/build_blobs.sh`
+  (Docker + the same ARM cross-toolchain `scripts/build_docker.sh` uses)
+  whenever `patch/*.cpp`/`nam_core` changes, and every gui/ target depends
+  on that rebuild -- nothing here ever trusts a stale or missing checked-in
+  binary. Requires Docker running locally the first time (or whenever
+  `patch/*.cpp` changes); a no-op on every build after that until something
+  changes again.
 - `core/http_download` (libcurl-backed download) and `core/zip_reader`
   (miniz-backed zip extraction/full-tree extraction) round out the GUI's
   download path. `core/patch_pipeline` is the actual end-to-end pipeline
@@ -67,6 +73,9 @@ result -- no terminal needed:
 - `third_party/nuklear/` -- vendored public-domain Nuklear + its SDL2
   renderer backend (both single-header, from the upstream
   Immediate-Mode-UI/Nuklear repo).
+- `scripts/build_blobs.sh` / `scripts/build_blobs_native.sh` (milestone 6)
+  -- rebuild `blobs/*` (see above); `../.github/workflows/gui-build.yml`
+  runs the same `_native.sh` script in CI.
 
 ## Building
 
@@ -80,7 +89,9 @@ Requires `e2fsprogs` (libext2fs), `xz` (liblzma), `curl` (libcurl), and
 `apt install e2fslibs-dev liblzma-dev libcurl4-openssl-dev libsdl2-dev`
 (package names vary by distro) on Linux. If SDL2 isn't found, the
 `headrush-nam-gui` target is skipped with a warning and `gui-core-cli`
-still builds.
+still builds. Also requires **Docker running** the first time (or
+whenever `patch/*.cpp`/`nam_core` changes) to (re)build `gui/blobs/*` --
+see the `blobs/` entry above.
 
 ## Running
 
@@ -194,3 +205,45 @@ parsing are both platform-agnostic), compared directly against
   verification extracted **all 5 files from both** `.exe`s and confirmed
   every one matches byte-for-byte, including the patched `Update.img`.
   Both outputs also pass `7z t` (archive integrity test) independently.
+
+### Milestone 6 (blob build-on-the-fly)
+
+`gui/scripts/build_blobs.sh` run for real against Docker (not just
+inspected): produces a valid ARM32 EABI5 stripped shared object and a
+32-byte trampoline, wired into CMake via `add_custom_command`/
+`add_dependencies` on both `gui-core-cli` and `headrush-nam-gui`. Verified
+all three states of the dependency graph: a clean build (no blobs present)
+triggers the Docker rebuild; a no-op rebuild (nothing changed) does
+`Built target` for everything with no Docker invocation at all; and
+touching `patch/nam_hook.cpp` correctly triggers exactly one rebuild.
+Caught two real bugs writing `build_blobs.sh` before ever running it: bare
+`g++`/`as`/`objcopy`/`strip` would have resolved to nothing (the container
+only has the ARM-prefixed toolchain names on `PATH`, not bare ones -- see
+`scripts/build_update_img.py`'s own `Toolchain` class, which never assumes
+bare names either), and an unescaped apostrophe inside the embedded
+single-quoted heredoc broke the shell script's own syntax. Refactored the
+actual compile logic out into `gui/scripts/build_blobs_native.sh` (assumes
+the ARM toolchain is already on `PATH`) so both the Docker-wrapped local
+path and CI share one script instead of duplicating flags in two places.
+
+`.github/workflows/gui-build.yml`'s `build-blobs` job (installs the same
+Bootlin toolchain directly, no Docker needed since the CI runner is
+already Linux, then runs `build_blobs_native.sh`) was run for real with
+[`act`](https://github.com/nektos/act) against local Docker -- not just
+authored and hoped for: **passed** (`✅ Success - Main Build blobs`,
+~90s), producing the same valid ARM32 shared objects. `actions/upload-
+artifact` fails under `act` specifically because it needs a real GitHub
+Actions backend token `act` cannot provide locally (`ACTIONS_RUNTIME_TOKEN`)
+-- a well-known, documented limitation of local `act` runs, not a bug in
+this workflow; that step is standard, widely-used action syntax with
+comparatively low risk. The `build-linux`/`build-macos`/`release` jobs
+were reviewed carefully but not run locally (`act` cannot emulate
+`macos-latest`, and the release job needs real tag/token context) -- worth
+a real push to confirm, whenever that's wanted.
+
+Windows is deliberately not built in CI yet: `gui/tools/gui_core_cli.c`
+and `gui/app/main.c` both use `mkdtemp()`/`<unistd.h>` (POSIX-only) for
+their work directory, which does not exist on real Windows -- see
+`app/main.c`'s own top comment. `app/win_repack.c`'s repack *logic* is
+already validated (milestone 5 above); the GUI app itself needs a
+Windows-compatible temp directory before it can compile there at all.

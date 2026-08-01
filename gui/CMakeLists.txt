@@ -85,10 +85,42 @@ endif()
 target_include_directories(nam_gui_core PUBLIC ${E2FSPROGS_INCLUDE_DIR})
 target_link_libraries(nam_gui_core PUBLIC ${E2FSPROGS_LIBRARIES})
 
+# gui/blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin} are pure
+# build ARTIFACTS -- deliberately NOT committed to git (see .gitignore).
+# They're a fixed function of patch/*.cpp + nam_core (never of user input),
+# so this target rebuilds them via Docker (gui/scripts/build_blobs.sh, the
+# same ARM cross-toolchain scripts/build_docker.sh uses) whenever their
+# real inputs change, and every build depends on it -- nothing here ever
+# trusts a possibly-stale/missing checked-in binary.
+file(GLOB NAM_HOOK_SOURCES
+  ${CMAKE_SOURCE_DIR}/../patch/nam_hook.cpp
+  ${CMAKE_SOURCE_DIR}/../patch/nam_preload.cpp
+  ${CMAKE_SOURCE_DIR}/../patch/trampoline_gonk.S
+)
+file(GLOB_RECURSE NAM_CORE_SOURCES
+  ${CMAKE_SOURCE_DIR}/../nam_core/NAM/*.cpp
+  ${CMAKE_SOURCE_DIR}/../nam_core/NAM/*.h
+)
+set(NAM_BLOBS
+  ${CMAKE_SOURCE_DIR}/blobs/libnam_hook.so
+  ${CMAKE_SOURCE_DIR}/blobs/libnam_preload.so
+  ${CMAKE_SOURCE_DIR}/blobs/trampoline_gonk.bin
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS}
+  COMMAND ${CMAKE_SOURCE_DIR}/scripts/build_blobs.sh
+  DEPENDS ${NAM_HOOK_SOURCES} ${NAM_CORE_SOURCES} ${CMAKE_SOURCE_DIR}/../docker/Dockerfile
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/..
+  COMMENT "Rebuilding gui/blobs/* from patch/*.cpp via the ARM cross-toolchain Docker image (needs Docker running)"
+  VERBATIM
+)
+add_custom_target(nam_gui_blobs ALL DEPENDS ${NAM_BLOBS})
+
 # gui/core CLI (milestone 1 -- no GUI yet). POSIX-only for now (mkdtemp) --
 # Windows support is a later packaging milestone.
 add_executable(gui-core-cli tools/gui_core_cli.c)
 target_link_libraries(gui-core-cli PRIVATE nam_gui_core)
+add_dependencies(gui-core-cli nam_gui_blobs)
 
 # Milestone 3: Nuklear (public domain, vendored header) + SDL2 GUI wrapping
 # nam_gui_core. Linux/simplest-output-path only for now (no .app/.exe
@@ -118,6 +150,7 @@ if(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
   add_executable(headrush-nam-gui ${GUI_APP_SOURCES})
   target_include_directories(headrush-nam-gui PRIVATE ${SDL2_INCLUDE_DIRS} third_party/nuklear)
   target_link_libraries(headrush-nam-gui PRIVATE nam_gui_core ${SDL2_LIBRARIES})
+  add_dependencies(headrush-nam-gui nam_gui_blobs)
   if(APPLE)
     target_link_libraries(headrush-nam-gui PRIVATE "-framework Cocoa")
   endif()
