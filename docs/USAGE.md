@@ -29,9 +29,15 @@ On the device, add the **Anxiety OD** pedal.
 | **TONE** | input trim |
 | **LEVEL** | output trim |
 
-On the **Pedalboard** the on-screen labels are relabeled to match (Model / Inp /
-Outp); on the **MX5** they keep their original **Drive / Tone / Level** names but
-do exactly the same thing.
+On the **Pedalboard** the on-screen knob labels are relabeled to match (Model /
+Inp / Outp); on the **MX5** they keep their original **Drive / Tone / Level**
+names but do exactly the same thing.
+
+The pedal's own name stays **Anxiety OD** on both devices — only the knob
+labels change (Pedalboard only). A pedal-title rename was tried and works
+byte-wise, but real-hardware testing showed it breaks the pedal (the string is
+very likely used as an internal type-name lookup key, not just a label), so
+it ships disabled.
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
 on every instance. That's fine — Anxiety OD **v2** is still available for a
