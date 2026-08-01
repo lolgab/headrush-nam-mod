@@ -5,14 +5,11 @@
  *     the whole .app bundle (milestone 4 -- see app/mac_package.c).
  *   - Windows: downloads the Windows updater zip (same CDN URL as
  *     quickstart_windows.sh) and repacks its embedded 7z SFX archive with
- *     the patched Update.img (milestone 5 -- see app/win_repack.c). NOTE:
- *     this path's *logic* is thoroughly validated (byte-identical output
- *     vs scripts/repack_windows_updater.py against real firmware, tested
- *     cross-platform since 7z/PE parsing needs no Windows host) but the
- *     GUI itself still cannot compile for real Windows: core/ext4_image.c
- *     depends on libext2fs, which has no vcpkg or MSYS2/MinGW port as of
- *     this writing (this file's own work-directory handling is already
- *     portable, see core/tempdir.h) -- see gui/README.md.
+ *     the patched Update.img (milestone 5 -- see app/win_repack.c). Builds
+ *     and runs on real Windows via a mingw-w64 cross-compiled libext2fs (no
+ *     vcpkg/MSYS2 binary package exists, but the e2fsprogs source builds
+ *     cleanly -- see gui/scripts/build_e2fsprogs_windows.sh and
+ *     gui/README.md).
  *   - Other OSes: a plain Update_nam.img (milestone 3's "simplest output
  *     path", matching quickstart_linux.sh).
  */
@@ -30,6 +27,7 @@
 #include "nuklear.h"
 #include "nuklear_sdl_renderer.h"
 
+#include "blobs_locate.h"
 #include "http_download.h"
 #include "model_targets.h"
 #include "patch_pipeline.h"
@@ -282,9 +280,17 @@ static int worker_main(void* data)
   shared_push_log(shared, "OK  extracted Update.img from the stock updater");
 #endif
 
+  char blobs_dir[900];
+  if (!nam_locate_blobs_dir(blobs_dir, sizeof(blobs_dir), err, sizeof(err)))
+  {
+    free(stock_img);
+    set_error(shared, err);
+    return 1;
+  }
+
   uint8_t* out_data;
   size_t out_len;
-  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, "gui/blobs", workdir, progress_to_log, shared,
+  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, blobs_dir, workdir, progress_to_log, shared,
                           &out_data, &out_len, err, sizeof(err));
   free(stock_img);
 

@@ -100,19 +100,28 @@ see the `blobs/` entry above.
 
 ## Running
 
-CLI (same argv shape as `build_update_img.py`):
+CLI (same argv shape as `build_update_img.py`; `--blobs-dir` is optional --
+see below):
 
 ```
 gui/build/gui-core-cli <stock Update.img> <out.img> --model pedalboard \
   --blobs-dir gui/blobs
 ```
 
-GUI (run from the repo root, or anywhere with `gui/blobs` reachable at
-`./gui/blobs` -- packaging the blobs path properly is milestone 6):
+GUI -- can be run from anywhere, not just the repo root:
 
 ```
 gui/build/headrush-nam-gui
 ```
+
+Both binaries locate `gui/blobs/*` at runtime relative to the running
+executable's own path (not the current working directory), so a
+double-clicked or arbitrarily-relocated binary still finds them: first
+`<exe_dir>/blobs` (the layout shipped in CI release archives, blobs
+sitting next to the binary), then `<exe_dir>/../blobs` (the local
+`gui/build/<exe>` + `gui/blobs` dev layout), then finally `./gui/blobs`
+relative to the current directory as a last resort. Pass `--blobs-dir`
+explicitly to override.
 
 Pick a model, click "Install NAM Mod" -- downloads the stock firmware,
 patches it, and writes the result (a patched `.app` on macOS,

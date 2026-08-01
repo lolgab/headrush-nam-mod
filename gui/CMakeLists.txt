@@ -20,6 +20,7 @@ add_library(nam_gui_core STATIC
   core/http_download.c
   core/zip_reader.c
   core/tempdir.c
+  core/blobs_locate.c
   third_party/sha1/sha1.c
   third_party/miniz/miniz.c
   third_party/miniz/miniz_tdef.c

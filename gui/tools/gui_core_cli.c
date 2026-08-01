@@ -10,6 +10,7 @@
  * usage: gui-core-cli <stock.img> <out.img> [--model pedalboard|mx5|gigboard]
  *                      [--blobs-dir DIR] [--keep-work-dir]
  */
+#include "blobs_locate.h"
 #include "patch_pipeline.h"
 #include "tempdir.h"
 
@@ -75,7 +76,7 @@ int main(int argc, char** argv)
   const char* input_img = argv[1];
   const char* output_img = argv[2];
   const char* model_name = NULL;
-  const char* blobs_dir = "gui/blobs";
+  const char* blobs_dir = NULL;
   bool keep_work_dir = false;
 
   for (int i = 3; i < argc; ++i)
@@ -88,6 +89,15 @@ int main(int argc, char** argv)
       keep_work_dir = true;
     else
       die("unknown argument: %s", argv[i]);
+  }
+
+  char located_blobs_dir[900];
+  if (!blobs_dir)
+  {
+    char locate_err[256];
+    if (!nam_locate_blobs_dir(located_blobs_dir, sizeof(located_blobs_dir), locate_err, sizeof(locate_err)))
+      die("%s (pass --blobs-dir DIR to override)", locate_err);
+    blobs_dir = located_blobs_dir;
   }
 
   char workdir[NAM_TEMPDIR_MAX_PATH];
