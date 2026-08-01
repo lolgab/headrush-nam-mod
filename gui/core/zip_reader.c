@@ -9,6 +9,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <direct.h> /* _mkdir -- mingw-w64's mkdir() takes only a path, no mode */
+#endif
 
 static void set_err(char* err, size_t err_size, const char* fmt, ...)
 {
@@ -34,7 +37,11 @@ static bool mkdir_p(const char* path, char* err, size_t err_size)
     if (*p == '/')
     {
       *p = '\0';
+#ifdef _WIN32
+      if (_mkdir(tmp) != 0 && errno != EEXIST)
+#else
       if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+#endif
       {
         set_err(err, err_size, "mkdir %s: %s", tmp, strerror(errno));
         return false;
@@ -42,7 +49,11 @@ static bool mkdir_p(const char* path, char* err, size_t err_size)
       *p = '/';
     }
   }
+#ifdef _WIN32
+  if (_mkdir(tmp) != 0 && errno != EEXIST)
+#else
   if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+#endif
   {
     set_err(err, err_size, "mkdir %s: %s", tmp, strerror(errno));
     return false;
@@ -182,6 +193,14 @@ bool nam_zip_extract_all(const uint8_t* zip_data, size_t zip_len, const char* de
       mz_free(link_target);
 
       unlink(full_path); /* fine if it doesn't exist */
+#ifdef _WIN32
+      /* Only ever reached by the macOS .app-repack flow (app/mac_package.c,
+       * APPLE-only); never invoked on a Windows build at runtime, so this
+       * just needs to compile, not really support symlinks. */
+      set_err(err, err_size, "creating symlink %s -> %s: not supported on this platform", full_path, target_str);
+      ok = false;
+      break;
+#else
       if (symlink(target_str, full_path) != 0)
       {
         set_err(err, err_size, "creating symlink %s -> %s: %s", full_path, target_str, strerror(errno));
@@ -189,6 +208,7 @@ bool nam_zip_extract_all(const uint8_t* zip_data, size_t zip_len, const char* de
         break;
       }
       continue;
+#endif
     }
 
     if (!mz_zip_reader_extract_to_file(&zip, (mz_uint)i, full_path, 0))
