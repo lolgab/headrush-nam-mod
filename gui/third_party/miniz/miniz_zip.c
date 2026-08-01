@@ -40,7 +40,7 @@ extern "C"
 #else
 #include <sys/stat.h>
 
-#if defined(_MSC_VER) || defined(__MINGW64__) || defined(__MINGW32__)
+#if defined(_MSC_VER)
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
