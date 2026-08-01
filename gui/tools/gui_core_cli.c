@@ -2,21 +2,22 @@
  * scripts/build_update_img.py, built entirely on gui/core (no debugfs/
  * e2fsck/xz/mkimage/python3 subprocess calls). Thin wrapper around
  * core/patch_pipeline.c -- the GUI app calls the exact same pipeline
- * function, see gui/app. POSIX-only for now (mkdtemp) -- Windows support
- * is a later packaging milestone, see
- * .claude/plans/crystalline-baking-moonbeam.md.
+ * function, see gui/app. Work-directory handling is portable (see
+ * core/tempdir.h); core/ext4_image.c's libext2fs dependency is the
+ * remaining blocker for a Windows build (no vcpkg/MSYS2 port exists) --
+ * see .claude/plans/crystalline-baking-moonbeam.md and gui/README.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> [--model pedalboard|mx5|gigboard]
  *                      [--blobs-dir DIR] [--keep-work-dir]
  */
 #include "patch_pipeline.h"
+#include "tempdir.h"
 
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 static void die(const char* fmt, ...)
 {
@@ -89,9 +90,10 @@ int main(int argc, char** argv)
       die("unknown argument: %s", argv[i]);
   }
 
-  char workdir[] = "/tmp/headrush-nam-build-XXXXXX";
-  if (!mkdtemp(workdir))
-    die("creating work directory: %s", strerror(errno));
+  char workdir[NAM_TEMPDIR_MAX_PATH];
+  char tempdir_err[256];
+  if (!nam_make_temp_dir(workdir, sizeof(workdir), tempdir_err, sizeof(tempdir_err)))
+    die("creating work directory: %s", tempdir_err);
   printf("working directory: %s\n", workdir);
 
   size_t input_len;
@@ -107,11 +109,7 @@ int main(int argc, char** argv)
   if (!ok)
   {
     if (!keep_work_dir)
-    {
-      char cmd[700];
-      snprintf(cmd, sizeof(cmd), "rm -rf '%s'", workdir);
-      system(cmd);
-    }
+      nam_remove_dir_recursive(workdir);
     die("%s", err);
   }
 
@@ -122,11 +120,7 @@ int main(int argc, char** argv)
   if (keep_work_dir)
     printf("--keep-work-dir: build directory left at %s\n", workdir);
   else
-  {
-    char cmd[700];
-    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", workdir);
-    system(cmd);
-  }
+    nam_remove_dir_recursive(workdir);
 
   printf("\nOK  Anxiety OD (v1) process() NAM hijack applied.\n");
   return 0;

@@ -19,6 +19,7 @@ add_library(nam_gui_core STATIC
   core/patch_pipeline.c
   core/http_download.c
   core/zip_reader.c
+  core/tempdir.c
   third_party/sha1/sha1.c
   third_party/miniz/miniz.c
   third_party/miniz/miniz_tdef.c
@@ -151,6 +152,14 @@ if(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
   target_include_directories(headrush-nam-gui PRIVATE ${SDL2_INCLUDE_DIRS} third_party/nuklear)
   target_link_libraries(headrush-nam-gui PRIVATE nam_gui_core ${SDL2_LIBRARIES})
   add_dependencies(headrush-nam-gui nam_gui_blobs)
+  # Nuklear (NK_IMPLEMENTATION, in app/main.c) calls libm functions
+  # (acos/sin/sqrt/...) directly -- on macOS those are folded into
+  # libSystem so this is a no-op there, but a separate libm.so is required
+  # on Linux or linking fails with "undefined reference to acos@@GLIBC_*".
+  find_library(MATH_LIBRARY m)
+  if(MATH_LIBRARY)
+    target_link_libraries(headrush-nam-gui PRIVATE ${MATH_LIBRARY})
+  endif()
   if(APPLE)
     target_link_libraries(headrush-nam-gui PRIVATE "-framework Cocoa")
   endif()

@@ -9,12 +9,12 @@
  *     this path's *logic* is thoroughly validated (byte-identical output
  *     vs scripts/repack_windows_updater.py against real firmware, tested
  *     cross-platform since 7z/PE parsing needs no Windows host) but the
- *     GUI itself hasn't been compiled/run on an actual Windows host in
- *     this repo yet -- mkdtemp() below needs a Windows replacement first.
+ *     GUI itself still cannot compile for real Windows: core/ext4_image.c
+ *     depends on libext2fs, which has no vcpkg or MSYS2/MinGW port as of
+ *     this writing (this file's own work-directory handling is already
+ *     portable, see core/tempdir.h) -- see gui/README.md.
  *   - Other OSes: a plain Update_nam.img (milestone 3's "simplest output
  *     path", matching quickstart_linux.sh).
- * POSIX only (mkdtemp) -- true Windows build support is future work (see
- * the NOTE above).
  */
 #include <SDL.h>
 
@@ -33,6 +33,7 @@
 #include "http_download.h"
 #include "model_targets.h"
 #include "patch_pipeline.h"
+#include "tempdir.h"
 #include "zip_reader.h"
 
 #ifdef __APPLE__
@@ -86,7 +87,7 @@ typedef struct
   int log_count;
   uint64_t dl_downloaded, dl_total;
   bool downloading;
-  char output_path[600];
+  char output_path[900]; /* matches out_path's declared size in worker_main, no truncation possible */
   char error_msg[1024];
   bool cancel_requested;
 } AppShared;
@@ -195,10 +196,11 @@ static int worker_main(void* data)
   SDL_UnlockMutex(shared->mutex);
   shared_push_log(shared, "OK  downloaded stock firmware updater");
 
-  char workdir[] = "/tmp/headrush-nam-build-XXXXXX";
-  if (!mkdtemp(workdir))
+  char workdir[NAM_TEMPDIR_MAX_PATH];
+  char tempdir_err[256];
+  if (!nam_make_temp_dir(workdir, sizeof(workdir), tempdir_err, sizeof(tempdir_err)))
   {
-    set_error(shared, "creating a temp work directory failed");
+    set_error(shared, tempdir_err);
     free(zip_data);
     return 1;
   }
@@ -288,9 +290,7 @@ static int worker_main(void* data)
 
   if (!ok)
   {
-    char rm_cmd[700];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", workdir);
-    system(rm_cmd);
+    nam_remove_dir_recursive(workdir);
     set_error(shared, err);
     return 1;
   }
@@ -314,9 +314,7 @@ static int worker_main(void* data)
   free(out_data);
   if (!packaged)
   {
-    char rm_cmd[700];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", workdir);
-    system(rm_cmd);
+    nam_remove_dir_recursive(workdir);
     set_error(shared, err);
     return 1;
   }
@@ -329,9 +327,7 @@ static int worker_main(void* data)
   free(out_data);
   if (!repacked)
   {
-    char rm_cmd[700];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", workdir);
-    system(rm_cmd);
+    nam_remove_dir_recursive(workdir);
     set_error(shared, err);
     return 1;
   }
@@ -343,9 +339,7 @@ static int worker_main(void* data)
     if (f)
       fclose(f);
     free(out_data);
-    char rm_cmd[700];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", workdir);
-    system(rm_cmd);
+    nam_remove_dir_recursive(workdir);
     set_error(shared, "writing Update_nam.img failed");
     return 1;
   }
@@ -353,9 +347,7 @@ static int worker_main(void* data)
   free(out_data);
 #endif
 
-  char rm_cmd[700];
-  snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf '%s'", workdir);
-  system(rm_cmd);
+  nam_remove_dir_recursive(workdir);
 
   SDL_LockMutex(shared->mutex);
   snprintf(shared->output_path, sizeof(shared->output_path), "%s", out_path);
@@ -475,7 +467,7 @@ int main(int argc, char** argv)
       }
       else if (state == APP_STATE_DONE)
       {
-        char path[600];
+        char path[900];
         SDL_LockMutex(shared.mutex);
         snprintf(path, sizeof(path), "%s", shared.output_path);
         SDL_UnlockMutex(shared.mutex);

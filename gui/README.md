@@ -236,14 +236,43 @@ artifact` fails under `act` specifically because it needs a real GitHub
 Actions backend token `act` cannot provide locally (`ACTIONS_RUNTIME_TOKEN`)
 -- a well-known, documented limitation of local `act` runs, not a bug in
 this workflow; that step is standard, widely-used action syntax with
-comparatively low risk. The `build-linux`/`build-macos`/`release` jobs
-were reviewed carefully but not run locally (`act` cannot emulate
-`macos-latest`, and the release job needs real tag/token context) -- worth
-a real push to confirm, whenever that's wanted.
+comparatively low risk.
 
-Windows is deliberately not built in CI yet: `gui/tools/gui_core_cli.c`
-and `gui/app/main.c` both use `mkdtemp()`/`<unistd.h>` (POSIX-only) for
-their work directory, which does not exist on real Windows -- see
-`app/main.c`'s own top comment. `app/win_repack.c`'s repack *logic* is
-already validated (milestone 5 above); the GUI app itself needs a
-Windows-compatible temp directory before it can compile there at all.
+A real push then exercised `build-linux` on an actual `ubuntu-latest`
+runner, and it failed: `undefined reference to symbol 'acos@@GLIBC_2.2.5'`
+linking `headrush-nam-gui` -- Nuklear (`NK_IMPLEMENTATION`, compiled into
+`app/main.c`) calls libm functions directly, and macOS folds libm into
+libSystem (so this silently worked in every local build all along) while
+Linux needs it linked explicitly. Fixed by linking `libm` (via
+`find_library(MATH_LIBRARY m)`) into `headrush-nam-gui`, and confirmed for
+real: built successfully in a fresh `ubuntu:24.04` Docker container with
+just the documented `apt install` dependencies, no other changes needed.
+
+### Portable work directory (temp-dir fix)
+
+`gui/tools/gui_core_cli.c` and `gui/app/main.c` used to call
+`mkdtemp()`/`<unistd.h>` directly (POSIX-only, no Windows equivalent).
+Factored into `core/tempdir.c` (`nam_make_temp_dir`/
+`nam_remove_dir_recursive`), with a real Windows implementation
+(`GetTempPathA` + the standard `GetTempFileNameA`-then-recreate-as-a-
+directory idiom, `rmdir /s /q` for cleanup) alongside the POSIX one.
+Caught a real, non-obvious bug while writing the POSIX side on this
+project's actual target compiler/SDK: `mkdtemp()`'s declaration in
+`<stdlib.h>` is only visible once `<unistd.h>` has already been included
+first -- the usual fix for this class of problem (`#define
+_DEFAULT_SOURCE`, a glibc idiom) did NOT make it visible here; only the
+`<unistd.h>`-before-`<stdlib.h>` include order did, confirmed by testing
+minimal repros of both against the real compiler before settling on it.
+Re-verified the full CLI (create a work directory, fail deliberately on
+invalid input, confirm no leftover directory) and the GUI app (launches,
+runs, exits cleanly) after the refactor, and re-ran the full Linux Docker
+build to confirm no regression from either this or the libm fix above.
+
+This closes ONE of the two real gaps blocking a Windows build. The other
+-- `core/ext4_image.c`'s dependency on libext2fs -- remains open and is
+larger: confirmed (via both the vcpkg ports index and the MSYS2/MinGW
+package index -- neither lists it) that no ready-made Windows port of
+libext2fs exists. `app/win_repack.c`'s repack *logic* is already validated
+(milestone 5 above) and is otherwise Windows-ready; the GUI app as a whole
+still cannot compile for real Windows until libext2fs is addressed, so
+no `windows-latest` CI job has been added yet.
