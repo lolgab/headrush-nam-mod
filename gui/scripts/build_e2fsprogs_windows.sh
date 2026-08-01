@@ -68,4 +68,18 @@ for lib in lib/et lib/ext2fs lib/e2p lib/uuid lib/blkid; do
     make -C "$lib" install
 done
 
+# include/mingw/ is e2fsprogs' OWN mingw compat header set (configure.ac
+# prepends it to e2fsprogs' own build for mingw* hosts -- see e.g.
+# include/mingw/linux/types.h, which typedefs dev_t/uid_t/gid_t to fixed-
+# width Linux-kernel-style types). `make install` does NOT install it
+# (it's an internal build-time compat layer, not e2fsprogs' own public
+# API) -- but libext2fs.a was compiled using THESE definitions, so an
+# external consumer needs the same ones for type-compatibility, not
+# whatever plain mingw-w64 headers might or might not provide on their
+# own. Confirmed necessary the hard way: omitting this compiled fine
+# against Docker's gcc-mingw-w64-x86-64-posix package (whose headers
+# happen to already define dev_t) but failed against real MSYS2 MINGW64
+# ("unknown type name 'dev_t'") on the first real windows-latest CI run.
+cp -r include/mingw "$PREFIX/include-mingw-compat"
+
 echo "OK  installed e2fsprogs Windows libs to $PREFIX"

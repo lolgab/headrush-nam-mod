@@ -83,7 +83,12 @@ if(WIN32)
                            "(needs bash + a mingw-w64-capable C compiler, e.g. an MSYS2 MinGW64 shell).")
     endif()
   endif()
-  set(E2FSPROGS_INCLUDE_DIR ${E2FSPROGS_WIN_PREFIX}/include)
+  # include-mingw-compat MUST come before include/ on the search path:
+  # it's e2fsprogs' own mingw compat header set (typedefs dev_t etc to
+  # match what libext2fs.a was actually compiled against) -- see
+  # build_e2fsprogs_windows.sh's own comment on why this is required, not
+  # optional, for a Windows build.
+  set(E2FSPROGS_INCLUDE_DIR ${E2FSPROGS_WIN_PREFIX}/include-mingw-compat ${E2FSPROGS_WIN_PREFIX}/include)
   set(E2FSPROGS_LIBRARIES
     ${E2FSPROGS_WIN_PREFIX}/lib/libext2fs.a
     ${E2FSPROGS_WIN_PREFIX}/lib/libe2p.a
@@ -91,6 +96,18 @@ if(WIN32)
     ${E2FSPROGS_WIN_PREFIX}/lib/libblkid.a
     ${E2FSPROGS_WIN_PREFIX}/lib/libuuid.a
   )
+  # ext2fs.h itself guards `#include <sys/types.h>` behind
+  # `#ifdef HAVE_SYS_TYPES_H` -- normally supplied by e2fsprogs' own
+  # generated (and never-installed) config.h when IT compiles, but never
+  # defined for an external consumer like us, so that #include silently
+  # never happens and dev_t/mode_t are left undeclared. Confirmed the hard
+  # way: identical on every platform's installed ext2fs.h (checked
+  # Homebrew's own copy too) -- it just never mattered on macOS/Linux
+  # because dev_t/mode_t happen to already be visible there via other
+  # unconditional standard headers ext2fs.h includes regardless
+  # (stdio.h's own chain, on a real POSIX libc); mingw-w64 is the first
+  # target where that coincidence doesn't hold.
+  target_compile_definitions(nam_gui_core PUBLIC HAVE_SYS_TYPES_H=1)
 else()
   # No .pc file on Homebrew, so search common keg/system locations
   # directly; override with -DE2FSPROGS_ROOT=... if yours lives elsewhere
