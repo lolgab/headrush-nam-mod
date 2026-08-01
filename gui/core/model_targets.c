@@ -59,11 +59,11 @@ const ModelTarget* nam_select_target(const char* model_name, const char* compati
         *reason_out = NULL;
       return NULL;
     }
+    /* Explicit selection (--model on the CLI, or the GUI's own model
+     * picker) needs no further explanation -- only auto-detected/defaulted
+     * selections get a reason string, see below. */
     if (reason_out)
-    {
-      snprintf(reason_buf, sizeof(reason_buf), "explicit --model %s", model_name);
-      *reason_out = reason_buf;
-    }
+      *reason_out = NULL;
     return t;
   }
 

@@ -100,12 +100,11 @@ see the `blobs/` entry above.
 
 ## Running
 
-CLI (same argv shape as `build_update_img.py`; `--blobs-dir` is optional --
-see below):
+CLI (same argv shape as `build_update_img.py`; local dev/debugging tool
+only, not built or shipped by CI):
 
 ```
-gui/build/gui-core-cli <stock Update.img> <out.img> --model pedalboard \
-  --blobs-dir gui/blobs
+gui/build/gui-core-cli <stock Update.img> <out.img> --model pedalboard
 ```
 
 GUI -- can be run from anywhere, not just the repo root:
@@ -114,14 +113,14 @@ GUI -- can be run from anywhere, not just the repo root:
 gui/build/headrush-nam-gui
 ```
 
-Both binaries locate `gui/blobs/*` at runtime relative to the running
-executable's own path (not the current working directory), so a
-double-clicked or arbitrarily-relocated binary still finds them: first
-`<exe_dir>/blobs` (the layout shipped in CI release archives, blobs
-sitting next to the binary), then `<exe_dir>/../blobs` (the local
-`gui/build/<exe>` + `gui/blobs` dev layout), then finally `./gui/blobs`
-relative to the current directory as a last resort. Pass `--blobs-dir`
-explicitly to override.
+Both binaries are fully self-contained: `gui/blobs/*` (compiled once by
+`gui/scripts/build_blobs.sh`/`build_blobs_native.sh` via the ARM
+cross-toolchain) gets embedded directly into the executable as C byte
+arrays at build time (`gui/tools/bin2c.c` generates the array sources,
+wired into `gui/CMakeLists.txt`; see `core/patch_pipeline.c`, which
+references them via `core/nam_blobs_embedded.h` instead of reading files
+from disk). No external files, no directory layout to preserve -- a
+double-clicked or arbitrarily-relocated binary just works.
 
 Pick a model, click "Install NAM Mod" -- downloads the stock firmware,
 patches it, and writes the result (a patched `.app` on macOS,

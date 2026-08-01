@@ -8,6 +8,51 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
 
+# Compiles gui/blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin}
+# (see the nam_gui_blobs target further down -- Docker/ARM-toolchain
+# cross-compiled from patch/*.cpp) directly into the binary as C byte
+# arrays, so the built executables need no external files at runtime.
+# bin2c is a plain, portable host tool (see gui/tools/bin2c.c) -- no xxd/
+# python dependency, just the C compiler the build already requires.
+# These add_custom_command calls reference gui/blobs/* as a file-level
+# DEPENDS even though the custom command that actually produces those
+# files (nam_gui_blobs, below) is declared later in this file -- CMake
+# resolves the full dependency graph after processing the whole file, so
+# this forward reference is fine.
+add_executable(bin2c tools/bin2c.c)
+
+set(NAM_BLOBS_GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${NAM_BLOBS_GENERATED_DIR})
+set(NAM_BLOBS_GENERATED_SOURCES
+  ${NAM_BLOBS_GENERATED_DIR}/blob_nam_hook.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_nam_preload.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_trampoline_gonk.c
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_nam_hook.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/blobs/libnam_hook.so
+          ${NAM_BLOBS_GENERATED_DIR}/blob_nam_hook.c g_nam_hook_so
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/blobs/libnam_hook.so
+  COMMENT "Embedding libnam_hook.so as a C byte array"
+  VERBATIM
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_nam_preload.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/blobs/libnam_preload.so
+          ${NAM_BLOBS_GENERATED_DIR}/blob_nam_preload.c g_nam_preload_so
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/blobs/libnam_preload.so
+  COMMENT "Embedding libnam_preload.so as a C byte array"
+  VERBATIM
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_trampoline_gonk.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/blobs/trampoline_gonk.bin
+          ${NAM_BLOBS_GENERATED_DIR}/blob_trampoline_gonk.c g_nam_trampoline_gonk_bin
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/blobs/trampoline_gonk.bin
+  COMMENT "Embedding trampoline_gonk.bin as a C byte array"
+  VERBATIM
+)
+
 add_library(nam_gui_core STATIC
   core/model_targets.c
   core/fit_image.c
@@ -20,7 +65,7 @@ add_library(nam_gui_core STATIC
   core/http_download.c
   core/zip_reader.c
   core/tempdir.c
-  core/blobs_locate.c
+  ${NAM_BLOBS_GENERATED_SOURCES}
   third_party/sha1/sha1.c
   third_party/miniz/miniz.c
   third_party/miniz/miniz_tdef.c

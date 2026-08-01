@@ -85,24 +85,36 @@ jobs:
       - name: Build
         run: |
           cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build gui/build --parallel
+          cmake --build gui/build --target headrush-nam-gui --parallel
+
+      - run: mv gui/build/headrush-nam-gui gui/build/headrush-nam-gui-linux
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-linux
-          path: |
-            gui/build/gui-core-cli
-            gui/build/headrush-nam-gui
-            gui/blobs
+          path: gui/build/headrush-nam-gui-linux
 
+  # macos-latest is an Apple Silicon (arm64) runner, so getting a real
+  # x86_64 build too (for Intel Macs) means building twice and lipo-ing the
+  # results together -- Homebrew itself has no cross-arch support. The
+  # x86_64 pass runs under Rosetta 2 with its OWN Homebrew prefix at
+  # /usr/local (the traditional Intel path, kept separate from the native
+  # arm64 install at /opt/homebrew) -- `arch -x86_64` re-execs everything
+  # (brew, cmake, the compiler) via their own x86_64 slices, which
+  # transparently produces genuine x86_64 objects with no cross-compile
+  # flags needed. CMAKE_IGNORE_PATH on each pass keeps that pass from
+  # accidentally resolving find_path/find_library to the OTHER arch's
+  # dylibs -- gui/CMakeLists.txt's e2fsprogs/curl/lzma searches hardcode
+  # BOTH /opt/homebrew/opt/<pkg> and /usr/local/opt/<pkg> in their PATHS
+  # lists (for regular single-arch dev machines), so both are on disk
+  # simultaneously here and would otherwise silently pick whichever ends
+  # up first, which can fail to link (or worse, not fail) depending on
+  # search order.
   build-macos:
     needs: build-blobs
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: brew install e2fsprogs xz curl sdl2
 
       - uses: actions/download-artifact@v4
         with:
@@ -111,18 +123,41 @@ jobs:
 
       - run: touch gui/blobs/*
 
-      - name: Build
+      - name: Install arm64 dependencies
+        run: brew install e2fsprogs xz curl sdl2
+
+      - name: Build (arm64, native)
         run: |
-          cmake -S gui -B gui/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build gui/build --parallel
+          cmake -S gui -B gui/build-arm64 -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PATH="/usr/local/include;/usr/local/lib;/usr/local/opt/curl/include;/usr/local/opt/curl/lib;/usr/local/opt/xz/include;/usr/local/opt/xz/lib;/usr/local/opt/e2fsprogs/include;/usr/local/opt/e2fsprogs/lib"
+          cmake --build gui/build-arm64 --target headrush-nam-gui --parallel
+
+      - name: Install Rosetta 2
+        run: softwareupdate --install-rosetta --agree-to-license || true
+
+      - name: Install x86_64 Homebrew + dependencies
+        run: |
+          if [ ! -x /usr/local/bin/brew ]; then
+            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          fi
+          arch -x86_64 /usr/local/bin/brew install e2fsprogs xz curl sdl2
+
+      - name: Build (x86_64, under Rosetta)
+        run: |
+          arch -x86_64 cmake -S gui -B gui/build-x86_64 -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_IGNORE_PATH="/opt/homebrew/include;/opt/homebrew/lib;/opt/homebrew/opt/curl/include;/opt/homebrew/opt/curl/lib;/opt/homebrew/opt/xz/include;/opt/homebrew/opt/xz/lib;/opt/homebrew/opt/e2fsprogs/include;/opt/homebrew/opt/e2fsprogs/lib"
+          arch -x86_64 cmake --build gui/build-x86_64 --target headrush-nam-gui --parallel
+
+      - name: Create universal binary
+        run: |
+          lipo -create -output gui/build-arm64/headrush-nam-gui-macos \
+            gui/build-arm64/headrush-nam-gui gui/build-x86_64/headrush-nam-gui
+          lipo -info gui/build-arm64/headrush-nam-gui-macos
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-macos
-          path: |
-            gui/build/gui-core-cli
-            gui/build/headrush-nam-gui
-            gui/blobs
+          path: gui/build-arm64/headrush-nam-gui-macos
 
   build-windows:
     needs: build-blobs
@@ -165,15 +200,14 @@ jobs:
       - name: Build
         run: |
           cmake -S gui -B gui/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build gui/build --parallel
+          cmake --build gui/build --target headrush-nam-gui --parallel
+
+      - run: mv gui/build/headrush-nam-gui.exe gui/build/headrush-nam-gui-windows.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-windows
-          path: |
-            gui/build/gui-core-cli.exe
-            gui/build/headrush-nam-gui.exe
-            gui/blobs
+          path: gui/build/headrush-nam-gui-windows.exe
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -186,17 +220,10 @@ jobs:
         with:
           pattern: headrush-nam-gui-*
           path: artifacts
-          merge-multiple: false
+          merge-multiple: true
 
-      - name: Package per-platform archives
-        run: |
-          set -euxo pipefail
-          cd artifacts
-          for dir in headrush-nam-gui-*; do
-            chmod +x "$dir"/* || true
-            tar -czf "../${dir}.tar.gz" -C "$dir" .
-          done
+      - run: chmod +x artifacts/*
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: "*.tar.gz"
+          files: artifacts/*

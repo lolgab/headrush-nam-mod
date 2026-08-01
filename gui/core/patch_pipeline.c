@@ -6,6 +6,7 @@
 #include "fit_image.h"
 #include "launcher_script.h"
 #include "model_targets.h"
+#include "nam_blobs_embedded.h"
 #include "qml_patch.h"
 #include "xz_codec.h"
 
@@ -89,7 +90,7 @@ static bool write_whole_file(const char* path, const uint8_t* data, size_t len, 
 }
 
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         const char* blobs_dir, const char* workdir, NamProgressFn progress, void* progress_user_data,
+                         const char* workdir, NamProgressFn progress, void* progress_user_data,
                          uint8_t** out_img_data, size_t* out_img_len, char* err, size_t err_size)
 {
   *out_img_data = NULL;
@@ -102,10 +103,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   uint8_t* evil_data = NULL;
   uint8_t* script_data_raw = NULL;
   char* script_data = NULL;
-  uint8_t* tramp = NULL;
   char* new_script = NULL;
-  uint8_t* hook_so = NULL;
-  uint8_t* preload_so = NULL;
   uint8_t* rootfs_patched = NULL;
   uint8_t* rootfs_patched_xz = NULL;
   uint8_t* out_fit = NULL;
@@ -138,7 +136,10 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     set_err(err, err_size, "unknown --model %s", model_name);
     goto cleanup;
   }
-  report(progress, progress_user_data, "OK  model target: %s  (%s)", target->name, reason);
+  if (reason)
+    report(progress, progress_user_data, "OK  model target: %s  (%s)", target->name, reason);
+  else
+    report(progress, progress_user_data, "OK  model target: %s", target->name);
 
   uint32_t splash_off, splash_len, recov_off, recov_len, rootfs_off, rootfs_len;
   if (!nam_fit_get_bytes(&props, "//images/splash", "data", &splash_off, &splash_len)
@@ -186,15 +187,11 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   free(script_data_raw);
   script_data_raw = NULL;
 
-  size_t tramp_len;
-  char tramp_path[600];
-  snprintf(tramp_path, sizeof(tramp_path), "%s/trampoline_gonk.bin", blobs_dir);
-  tramp = read_whole_file_or_null(tramp_path, &tramp_len, err, err_size);
-  if (!tramp)
-    goto cleanup;
+  const uint8_t* tramp = g_nam_trampoline_gonk_bin;
+  size_t tramp_len = (size_t)g_nam_trampoline_gonk_bin_len;
   if (tramp_len != 32)
   {
-    set_err(err, err_size, "%s is %zu bytes, expected exactly 32", tramp_path, tramp_len);
+    set_err(err, err_size, "embedded trampoline_gonk.bin is %zu bytes, expected exactly 32", tramp_len);
     goto cleanup;
   }
 
@@ -204,8 +201,6 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     goto cleanup;
   report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
          elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
-  free(tramp);
-  tramp = NULL;
 
   if (target->qml_rename_count > 0)
   {
@@ -229,16 +224,10 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   if (!nam_ext4_inject(img, "/usr/Evil/Evil", evil_data, evil_len, 0755, err, err_size))
     goto cleanup;
 
-  size_t hook_so_len, preload_so_len;
-  char hook_so_path[600], preload_so_path[600];
-  snprintf(hook_so_path, sizeof(hook_so_path), "%s/libnam_hook.so", blobs_dir);
-  snprintf(preload_so_path, sizeof(preload_so_path), "%s/libnam_preload.so", blobs_dir);
-  hook_so = read_whole_file_or_null(hook_so_path, &hook_so_len, err, err_size);
-  if (!hook_so)
-    goto cleanup;
-  preload_so = read_whole_file_or_null(preload_so_path, &preload_so_len, err, err_size);
-  if (!preload_so)
-    goto cleanup;
+  const uint8_t* hook_so = g_nam_hook_so;
+  size_t hook_so_len = (size_t)g_nam_hook_so_len;
+  const uint8_t* preload_so = g_nam_preload_so;
+  size_t preload_so_len = (size_t)g_nam_preload_so_len;
 
   if (!nam_ext4_inject(img, "/usr/Evil/libnam_hook.so", hook_so, hook_so_len, 0755, err, err_size))
     goto cleanup;
@@ -256,10 +245,6 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
 
   nam_ext4_close(img);
   img = NULL;
-  free(hook_so);
-  hook_so = NULL;
-  free(preload_so);
-  preload_so = NULL;
   free(new_script);
   new_script = NULL;
 
@@ -340,10 +325,7 @@ cleanup:
   free(evil_data);
   free(script_data_raw);
   free(script_data);
-  free(tramp);
   free(new_script);
-  free(hook_so);
-  free(preload_so);
   free(rootfs_patched);
   free(rootfs_patched_xz);
   free(out_fit);

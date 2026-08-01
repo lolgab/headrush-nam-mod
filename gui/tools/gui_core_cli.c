@@ -3,14 +3,12 @@
  * e2fsck/xz/mkimage/python3 subprocess calls). Thin wrapper around
  * core/patch_pipeline.c -- the GUI app calls the exact same pipeline
  * function, see gui/app. Work-directory handling is portable (see
- * core/tempdir.h); core/ext4_image.c's libext2fs dependency is the
- * remaining blocker for a Windows build (no vcpkg/MSYS2 port exists) --
- * see .claude/plans/crystalline-baking-moonbeam.md and gui/README.md.
+ * core/tempdir.h). Local dev/debugging tool only -- not built or shipped
+ * by CI, see gui/README.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> [--model pedalboard|mx5|gigboard]
- *                      [--blobs-dir DIR] [--keep-work-dir]
+ *                      [--keep-work-dir]
  */
-#include "blobs_locate.h"
 #include "patch_pipeline.h"
 #include "tempdir.h"
 
@@ -70,34 +68,21 @@ static void print_progress(const char* message, void* user_data)
 int main(int argc, char** argv)
 {
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> [--model pedalboard|mx5|gigboard] [--blobs-dir DIR] [--keep-work-dir]",
-        argv[0]);
+    die("usage: %s <stock.img> <out.img> [--model pedalboard|mx5|gigboard] [--keep-work-dir]", argv[0]);
 
   const char* input_img = argv[1];
   const char* output_img = argv[2];
   const char* model_name = NULL;
-  const char* blobs_dir = NULL;
   bool keep_work_dir = false;
 
   for (int i = 3; i < argc; ++i)
   {
     if (strcmp(argv[i], "--model") == 0 && i + 1 < argc)
       model_name = argv[++i];
-    else if (strcmp(argv[i], "--blobs-dir") == 0 && i + 1 < argc)
-      blobs_dir = argv[++i];
     else if (strcmp(argv[i], "--keep-work-dir") == 0)
       keep_work_dir = true;
     else
       die("unknown argument: %s", argv[i]);
-  }
-
-  char located_blobs_dir[900];
-  if (!blobs_dir)
-  {
-    char locate_err[256];
-    if (!nam_locate_blobs_dir(located_blobs_dir, sizeof(located_blobs_dir), locate_err, sizeof(locate_err)))
-      die("%s (pass --blobs-dir DIR to override)", locate_err);
-    blobs_dir = located_blobs_dir;
   }
 
   char workdir[NAM_TEMPDIR_MAX_PATH];
@@ -112,8 +97,8 @@ int main(int argc, char** argv)
   uint8_t* out_data;
   size_t out_len;
   char err[1024];
-  bool ok = nam_patch_pipeline(input_data, input_len, model_name, blobs_dir, workdir, print_progress, NULL, &out_data,
-                                &out_len, err, sizeof(err));
+  bool ok = nam_patch_pipeline(input_data, input_len, model_name, workdir, print_progress, NULL, &out_data, &out_len,
+                                err, sizeof(err));
   free(input_data);
 
   if (!ok)

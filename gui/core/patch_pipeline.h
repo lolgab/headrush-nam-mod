@@ -20,15 +20,16 @@ typedef void (*NamProgressFn)(const char* message, void* user_data);
 
 /* `workdir` must already exist (the caller creates and later removes it,
  * e.g. via mkdtemp) -- used only for the rootfs ext4 image's temp files.
- * `blobs_dir` is the directory containing libnam_hook.so/libnam_preload.so/
- * trampoline_gonk.bin (see gui/blobs). `model_name` may be NULL to
- * auto-detect from the stock image's `compatible` string.
+ * libnam_hook.so/libnam_preload.so/trampoline_gonk.bin are compiled
+ * directly into the binary (see core/nam_blobs_embedded.h), not read from
+ * disk. `model_name` may be NULL to auto-detect from the stock image's
+ * `compatible` string.
  *
  * On success, *out_img_data is a malloc'd buffer (caller frees it)
  * containing the patched Update.img, and returns true. On failure, writes
  * a reason into err and returns false. */
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         const char* blobs_dir, const char* workdir, NamProgressFn progress, void* progress_user_data,
+                         const char* workdir, NamProgressFn progress, void* progress_user_data,
                          uint8_t** out_img_data, size_t* out_img_len, char* err, size_t err_size);
 
 #endif

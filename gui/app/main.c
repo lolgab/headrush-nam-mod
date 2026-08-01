@@ -27,7 +27,6 @@
 #include "nuklear.h"
 #include "nuklear_sdl_renderer.h"
 
-#include "blobs_locate.h"
 #include "http_download.h"
 #include "model_targets.h"
 #include "patch_pipeline.h"
@@ -358,18 +357,10 @@ static int worker_main(void* data)
   shared_push_log(shared, "OK  extracted Update.img from the stock updater");
 #endif
 
-  char blobs_dir[900];
-  if (!nam_locate_blobs_dir(blobs_dir, sizeof(blobs_dir), err, sizeof(err)))
-  {
-    free(stock_img);
-    set_error(shared, err);
-    return 1;
-  }
-
   uint8_t* out_data;
   size_t out_len;
-  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, blobs_dir, workdir, progress_to_log, shared,
-                          &out_data, &out_len, err, sizeof(err));
+  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, workdir, progress_to_log, shared, &out_data,
+                          &out_len, err, sizeof(err));
   free(stock_img);
 
   if (!ok)
