@@ -277,7 +277,15 @@ jobs:
       # rights?)". core/http_download.c points CURLOPT_CAINFO at
       # "ca-bundle.crt" next to the exe on Windows -- ship it there.
       - name: Bundle CA bundle
-        run: cp /mingw64/ssl/certs/ca-bundle.crt build/dist/ca-bundle.crt
+        run: |
+          set -euo pipefail
+          CA_BUNDLE=$(pacman -Ql mingw-w64-x86_64-ca-certificates | awk '{print $2}' | grep -E '(ca-bundle\.crt|cacert\.pem)$' | head -1)
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "Could not locate ca-bundle.crt/cacert.pem from mingw-w64-x86_64-ca-certificates package" >&2
+            pacman -Ql mingw-w64-x86_64-ca-certificates >&2
+            exit 1
+          fi
+          cp "$CA_BUNDLE" build/dist/ca-bundle.crt
 
       - name: Zip Windows dist
         run: |
