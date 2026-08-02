@@ -274,6 +274,10 @@ if(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
   if(APPLE)
     target_link_libraries(headrush-nam-gui PRIVATE "-framework Cocoa")
   endif()
+  if(WIN32)
+    # ShellExecuteA (app/main.c's nam_open_path) needs shell32.
+    target_link_libraries(headrush-nam-gui PRIVATE shell32)
+  endif()
 else()
   message(WARNING "SDL2 not found -- skipping headrush-nam-gui target (gui-core-cli still builds). "
                    "macOS: brew install sdl2; Debian/Ubuntu: apt install libsdl2-dev.")

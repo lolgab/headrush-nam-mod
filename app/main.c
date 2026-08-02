@@ -38,6 +38,7 @@
 #ifdef _WIN32
 #include "win_repack.h"
 #include <windows.h>
+#include <shellapi.h>
 #endif
 
 #include <stdio.h>
@@ -193,19 +194,28 @@ static void windows_shell_quote(const char* path, char* out, size_t out_size)
  * installer, or the plain .img on Linux -- whatever the OS does with it). */
 static void nam_open_path(const char* path)
 {
+#if defined(__APPLE__)
   char quoted[1024];
   char cmd[1200];
-#if defined(__APPLE__)
   posix_shell_quote(path, quoted, sizeof(quoted));
   snprintf(cmd, sizeof(cmd), "open %s", quoted);
+  (void)system(cmd); /* best-effort UI convenience -- nothing to recover from if it fails */
 #elif defined(_WIN32)
-  windows_shell_quote(path, quoted, sizeof(quoted));
-  snprintf(cmd, sizeof(cmd), "start \"\" %s", quoted);
+  /* Deliberately NOT system()/cmd.exe -- same bug class fixed for 7z in
+   * win_repack.c's run_7z(): cmd.exe's command-lookup heuristic mangles
+   * command lines once a path has both spaces and parens (every output
+   * path here does, e.g. "...Firmware Updater (NAM mod).exe"), so the
+   * old "start \"\" <path>" silently failed. ShellExecuteA takes the
+   * path as its own parameter, never as part of a parsed command line,
+   * so it isn't subject to that parser at all. */
+  ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
 #else
+  char quoted[1024];
+  char cmd[1200];
   posix_shell_quote(path, quoted, sizeof(quoted));
   snprintf(cmd, sizeof(cmd), "xdg-open %s", quoted);
+  (void)system(cmd);
 #endif
-  (void)system(cmd); /* best-effort UI convenience -- nothing to recover from if it fails */
 }
 
 /* Reveals `path` in the OS's file manager (Finder/Explorer), selecting it
@@ -213,15 +223,39 @@ static void nam_open_path(const char* path)
  * containing folder on Linux. */
 static void nam_reveal_path(const char* path)
 {
+#if defined(__APPLE__)
   char quoted[1024];
   char cmd[1200];
-#if defined(__APPLE__)
   posix_shell_quote(path, quoted, sizeof(quoted));
   snprintf(cmd, sizeof(cmd), "open -R %s", quoted);
+  (void)system(cmd);
 #elif defined(_WIN32)
+  /* Deliberately NOT system()/cmd.exe -- same bug class fixed for 7z in
+   * win_repack.c's run_7z(): once `path` has spaces + parens, cmd.exe's
+   * command-lookup heuristic mangles "explorer /select,<path>" and
+   * either no-ops or drops the /select argument, which is why this
+   * button opened Explorer to the desktop instead of selecting the
+   * file. CreateProcessA launches explorer.exe directly, bypassing
+   * cmd.exe's parser entirely (explorer's own /select parsing is
+   * unchanged and already correct). */
+  char quoted[1024];
   windows_shell_quote(path, quoted, sizeof(quoted));
-  snprintf(cmd, sizeof(cmd), "explorer /select,%s", quoted);
+  char cmdline[1300];
+  snprintf(cmdline, sizeof(cmdline), "explorer.exe /select,%s", quoted);
+
+  STARTUPINFOA si;
+  memset(&si, 0, sizeof(si));
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi;
+  memset(&pi, 0, sizeof(pi));
+  if (CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+  {
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+  }
 #else
+  char quoted[1024];
+  char cmd[1200];
   char dir[900];
   snprintf(dir, sizeof(dir), "%s", path);
   char* slash = strrchr(dir, '/');
@@ -231,8 +265,8 @@ static void nam_reveal_path(const char* path)
     snprintf(dir, sizeof(dir), ".");
   posix_shell_quote(dir, quoted, sizeof(quoted));
   snprintf(cmd, sizeof(cmd), "xdg-open %s", quoted);
-#endif
   (void)system(cmd);
+#endif
 }
 
 static int worker_main(void* data)
@@ -404,6 +438,25 @@ static int worker_main(void* data)
   }
   if (err[0] != '\0')
     shared_push_log(shared, err); /* non-fatal codesign warning, if any */
+
+  /* Keep an unmodified copy of the stock updater alongside the patched
+   * one, for recovery -- the old (now-deleted) quickstart_mac.sh did
+   * this too before the C/SDL2 rewrite dropped it. Best-effort: nothing
+   * to recover from if it fails, the patched output above is what
+   * matters. */
+  {
+    char stock_out_path[900];
+    snprintf(stock_out_path, sizeof(stock_out_path), "%s/%s (stock).app", cwd, app_base_name);
+    char q_app[1300], q_stock_out[1300];
+    posix_shell_quote(app_dir, q_app, sizeof(q_app));
+    posix_shell_quote(stock_out_path, q_stock_out, sizeof(q_stock_out));
+    char cpcmd[3000];
+    snprintf(cpcmd, sizeof(cpcmd), "rm -rf %s && cp -R %s %s", q_stock_out, q_app, q_stock_out);
+    if (system(cpcmd) == 0)
+      shared_push_log(shared, "OK  saved unmodified stock updater alongside the patched one (for recovery)");
+    else
+      shared_push_log(shared, "note: couldn't save a copy of the unmodified stock updater (non-fatal)");
+  }
 #elif defined(_WIN32)
   snprintf(out_path, sizeof(out_path), "%s/HeadRush %s Firmware Updater (NAM mod).exe", cwd, target->name);
   bool repacked =
@@ -414,6 +467,21 @@ static int worker_main(void* data)
     nam_remove_dir_recursive(workdir);
     set_error(shared, err);
     return 1;
+  }
+
+  /* Keep an unmodified copy of the stock updater alongside the patched
+   * one, for recovery -- the old (now-deleted) quickstart_windows.sh did
+   * this too before the C/SDL2 rewrite dropped it. Best-effort: nothing
+   * to recover from if it fails, the patched output above is what
+   * matters. */
+  {
+    char stock_out_path[900];
+    snprintf(stock_out_path, sizeof(stock_out_path), "%s/HeadRush %s Firmware Updater (stock).exe", cwd,
+              target->name);
+    if (CopyFileA(stock_exe_path, stock_out_path, FALSE))
+      shared_push_log(shared, "OK  saved unmodified stock updater alongside the patched one (for recovery)");
+    else
+      shared_push_log(shared, "note: couldn't save a copy of the unmodified stock updater (non-fatal)");
   }
 #else
   snprintf(out_path, sizeof(out_path), "%s/Update_nam.img", cwd);
