@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <windows.h>
 
 static void set_err(char* err, size_t err_size, const char* fmt, ...)
 {
@@ -17,16 +18,103 @@ static void set_err(char* err, size_t err_size, const char* fmt, ...)
   va_end(ap);
 }
 
-/* This whole file only ever compiles for _WIN32 (see CMakeLists.txt) --
- * every system() call below is deliberately cmd.exe syntax (double-quote
- * paths, "mkdir" with no -p since Windows' own mkdir already creates
- * intermediate directories, ">nul" not ">/dev/null"), not a portable
- * shell abstraction. No embedded-quote escaping: every path passed
- * through here is built from our own temp directory plus fixed filenames
- * (see EXPECTED_ENTRIES below), never arbitrary/user-supplied text. */
+/* This whole file only ever compiles for _WIN32 (see CMakeLists.txt).
+ * No embedded-quote escaping below: every path passed through here is
+ * built from our own temp directory plus fixed filenames (see
+ * EXPECTED_ENTRIES below), never arbitrary/user-supplied text -- plain
+ * wrap-in-quotes is exactly the quoting CreateProcess's own argv-parsing
+ * expects (MSVCRT convention), no different from any other Windows child
+ * process launch. */
 static void shell_quote(const char* path, char* out, size_t out_size)
 {
   snprintf(out, out_size, "\"%s\"", path);
+}
+
+static bool win_mkdir_if_missing(const char* path)
+{
+  if (CreateDirectoryA(path, NULL))
+    return true;
+  return GetLastError() == ERROR_ALREADY_EXISTS;
+}
+
+/* Runs `sevenzip_path` with `args` (NULL-terminated, each already quoted
+ * via shell_quote) via CreateProcessA directly -- deliberately NOT
+ * system()/cmd.exe. system() shells out through `cmd.exe /c <cmdline>`,
+ * whose command-lookup heuristic breaks down once a command line has
+ * more than the one quoted "executable name" pair of quotes it expects
+ * (exactly what every call here has: one quoted pair for the exe, one or
+ * more for its quoted path arguments) -- confirmed on real hardware: it
+ * throws "'<mangled command>' is not recognized as an internal or
+ * external command" even though the exe and every argument path are
+ * completely valid. CreateProcess's own argv-splitting for the CHILD
+ * process follows the simple, unambiguous MSVCRT quoting convention
+ * instead (a quoted substring is one argument, no quote-count
+ * restriction), so building the command line this way and calling
+ * CreateProcess directly sidesteps the entire bug class rather than
+ * trying to out-guess cmd.exe's parser. optional `cwd` (NULL for none)
+ * replaces the old "cd /d X && ..." shell prefix. 7z's own stdout/stderr
+ * are redirected to NUL, replacing the old ">nul" shell redirection. */
+static bool run_7z(const char* sevenzip_path, const char* const* args, const char* cwd, char* err, size_t err_size)
+{
+  char qexe[1300];
+  shell_quote(sevenzip_path, qexe, sizeof(qexe));
+
+  char cmdline[3200];
+  size_t len = 0;
+  int n = snprintf(cmdline, sizeof(cmdline), "%s", qexe);
+  if (n < 0 || (size_t)n >= sizeof(cmdline))
+  {
+    set_err(err, err_size, "7z command line too long");
+    return false;
+  }
+  len = (size_t)n;
+  for (size_t i = 0; args[i]; ++i)
+  {
+    n = snprintf(cmdline + len, sizeof(cmdline) - len, " %s", args[i]);
+    if (n < 0 || (size_t)n >= sizeof(cmdline) - len)
+    {
+      set_err(err, err_size, "7z command line too long");
+      return false;
+    }
+    len += (size_t)n;
+  }
+
+  SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+  HANDLE devnull = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING, 0, NULL);
+  if (devnull == INVALID_HANDLE_VALUE)
+  {
+    set_err(err, err_size, "opening NUL failed");
+    return false;
+  }
+
+  STARTUPINFOA si = {0};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = devnull;
+  si.hStdError = devnull;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+  PROCESS_INFORMATION pi = {0};
+  BOOL started = CreateProcessA(sevenzip_path, cmdline, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, cwd, &si, &pi);
+  CloseHandle(devnull);
+  if (!started)
+  {
+    set_err(err, err_size, "launching %s failed (CreateProcess error %lu)", sevenzip_path, GetLastError());
+    return false;
+  }
+
+  WaitForSingleObject(pi.hProcess, INFINITE);
+  DWORD exit_code = 1;
+  GetExitCodeProcess(pi.hProcess, &exit_code);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+
+  if (exit_code != 0)
+  {
+    set_err(err, err_size, "%s exited with code %lu", sevenzip_path, exit_code);
+    return false;
+  }
+  return true;
 }
 
 static uint32_t rd32(const uint8_t* d, size_t off)
@@ -211,12 +299,18 @@ bool nam_win_extract_stock_img(const char* stock_exe_path, const char* sevenzip_
     return false;
   }
 
-  char q1[1300], q2[1300], q3[1300], cmd[3200];
+  if (!win_mkdir_if_missing(payload_dir))
+  {
+    set_err(err, err_size, "creating %s failed", payload_dir);
+    return false;
+  }
+
+  char q1[1300], q2[1300], oarg[1320];
   shell_quote(payload_dir, q1, sizeof(q1));
   shell_quote(stock7z_path, q2, sizeof(q2));
-  shell_quote(sevenzip_path, q3, sizeof(q3));
-  snprintf(cmd, sizeof(cmd), "if not exist %s mkdir %s && %s x -o%s %s -y >nul", q1, q1, q3, q1, q2);
-  if (system(cmd) != 0)
+  snprintf(oarg, sizeof(oarg), "-o%s", q1);
+  const char* extract_args[] = {"x", oarg, q2, "-y", NULL};
+  if (!run_7z(sevenzip_path, extract_args, NULL, err, err_size))
   {
     set_err(err, err_size, "extracting the stock updater's embedded 7z archive failed");
     return false;
@@ -269,13 +363,12 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
     return false;
   }
 
-  char q1[1300], q2[1300], qexe[1300];
+  char q1[1300], q2[1300];
   char stock7z_path[700], payload_dir[700], new7z_path[700], verify_dir[700];
   snprintf(stock7z_path, sizeof(stock7z_path), "%s/stock.7z", workdir);
   snprintf(payload_dir, sizeof(payload_dir), "%s/payload", workdir);
   snprintf(new7z_path, sizeof(new7z_path), "%s/new.7z", workdir);
   snprintf(verify_dir, sizeof(verify_dir), "%s/verify", workdir);
-  shell_quote(sevenzip_path, qexe, sizeof(qexe));
 
   if (!write_whole_file(stock7z_path, stock_data + archive_start, stock_len - archive_start))
   {
@@ -286,11 +379,19 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
   }
   free(stock_data);
 
-  char cmd[3200];
+  if (!win_mkdir_if_missing(payload_dir))
+  {
+    set_err(err, err_size, "creating %s failed", payload_dir);
+    free(sfx_prefix);
+    return false;
+  }
+
+  char oarg[1320];
   shell_quote(payload_dir, q1, sizeof(q1));
   shell_quote(stock7z_path, q2, sizeof(q2));
-  snprintf(cmd, sizeof(cmd), "if not exist %s mkdir %s && %s x -o%s %s -y >nul", q1, q1, qexe, q1, q2);
-  if (system(cmd) != 0)
+  snprintf(oarg, sizeof(oarg), "-o%s", q1);
+  const char* extract_args[] = {"x", oarg, q2, "-y", NULL};
+  if (!run_7z(sevenzip_path, extract_args, NULL, err, err_size))
   {
     set_err(err, err_size, "extracting the stock updater's embedded 7z archive failed");
     free(sfx_prefix);
@@ -322,17 +423,20 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
   }
 
   shell_quote(new7z_path, q1, sizeof(q1));
-  shell_quote(payload_dir, q2, sizeof(q2));
-  char names[600] = {0};
+  char qnames[EXPECTED_ENTRY_COUNT][300];
+  const char* add_args[2 + EXPECTED_ENTRY_COUNT + 1];
+  add_args[0] = "a";
+  add_args[1] = q1;
   for (size_t i = 0; i < EXPECTED_ENTRY_COUNT; ++i)
   {
-    char qn[300];
-    shell_quote(EXPECTED_ENTRIES[i], qn, sizeof(qn));
-    strncat(names, qn, sizeof(names) - strlen(names) - 1);
-    strncat(names, " ", sizeof(names) - strlen(names) - 1);
+    shell_quote(EXPECTED_ENTRIES[i], qnames[i], sizeof(qnames[i]));
+    add_args[2 + i] = qnames[i];
   }
-  snprintf(cmd, sizeof(cmd), "cd /d %s && %s a %s %s >nul", q2, qexe, q1, names);
-  if (system(cmd) != 0)
+  add_args[2 + EXPECTED_ENTRY_COUNT] = NULL;
+  /* payload_dir as cwd (replaces the old "cd /d" shell prefix) so the
+   * entry names above resolve relative to it, not this process's own
+   * cwd, while new7z_path (q1) stays the absolute path it already is. */
+  if (!run_7z(sevenzip_path, add_args, payload_dir, err, err_size))
   {
     set_err(err, err_size, "creating the new 7z archive failed");
     free(sfx_prefix);
@@ -363,17 +467,23 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
 
   /* ---- round-trip verification ---- */
   shell_quote(output_exe_path, q1, sizeof(q1));
-  snprintf(cmd, sizeof(cmd), "%s t %s >nul", qexe, q1);
-  if (system(cmd) != 0)
+  const char* test_args[] = {"t", q1, NULL};
+  if (!run_7z(sevenzip_path, test_args, NULL, err, err_size))
   {
     set_err(err, err_size, "7z integrity test on the repacked .exe failed -- refusing to leave a broken installer "
                             "in place");
     return false;
   }
 
+  if (!win_mkdir_if_missing(verify_dir))
+  {
+    set_err(err, err_size, "creating %s failed", verify_dir);
+    return false;
+  }
   shell_quote(verify_dir, q2, sizeof(q2));
-  snprintf(cmd, sizeof(cmd), "if not exist %s mkdir %s && %s x -o%s %s -y >nul", q2, q2, qexe, q2, q1);
-  if (system(cmd) != 0)
+  snprintf(oarg, sizeof(oarg), "-o%s", q2);
+  const char* verify_extract_args[] = {"x", oarg, q1, "-y", NULL};
+  if (!run_7z(sevenzip_path, verify_extract_args, NULL, err, err_size))
   {
     set_err(err, err_size, "round-trip FAILED: couldn't extract the repacked .exe for verification");
     return false;
