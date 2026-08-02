@@ -37,6 +37,7 @@
 #endif
 #ifdef _WIN32
 #include "win_repack.h"
+#include <windows.h>
 #endif
 
 #include <stdio.h>
@@ -311,10 +312,21 @@ static int worker_main(void* data)
   }
   shared_push_log(shared, "OK  extracted the stock updater .app");
 #elif defined(_WIN32)
-  /* TODO(milestone 6/packaging): "7z" here assumes a 7z-compatible CLI is
-   * on PATH (fine for dev testing) -- ship a bundled 7za.exe and point
-   * this at it instead so end users install nothing. */
-  const char* sevenzip_path = "7z";
+  /* Never rely on a "7z" on PATH -- most end users have no 7-Zip CLI
+   * installed at all (even those with the 7-Zip GUI usually don't have it
+   * on PATH). The release zip ships 7z.exe + 7z.dll next to this exe;
+   * resolve them by this exe's own directory instead. */
+  char sevenzip_path[MAX_PATH];
+  {
+    DWORD n = GetModuleFileNameA(NULL, sevenzip_path, sizeof(sevenzip_path));
+    char* slash = (n > 0 && n < sizeof(sevenzip_path)) ? strrchr(sevenzip_path, '\\') : NULL;
+    if (!slash)
+    {
+      set_error(shared, "couldn't determine this exe's own directory (GetModuleFileNameA failed)");
+      return 1;
+    }
+    snprintf(slash + 1, sizeof(sevenzip_path) - (size_t)(slash + 1 - sevenzip_path), "7z.exe");
+  }
 
   uint8_t* exe_data;
   size_t exe_len;

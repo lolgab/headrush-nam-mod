@@ -13,6 +13,13 @@ name: gui build
 # it from source instead -- confirmed to actually work by cross-compiling
 # it for mingw-w64 in Docker before writing that script (see
 # docs/BUILDING.md's verification section).
+#
+# "Depends only on the mingw-w64 runtime" still means real DLLs (libcurl,
+# liblzma, SDL2, libwinpthread) that a stock Windows box does not have --
+# they don't ship with Windows and MSYS2 isn't installed on end-user
+# machines. The exe alone 0xc000007b's / "missing DLL" pop-ups on launch
+# (see https://github.com/lolgab/headrush-nam-mod/issues/7); the build
+# must ship those DLLs alongside it, not just the .exe.
 on:
   push:
     branches: [main]
@@ -214,6 +221,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-curl
+            mingw-w64-x86_64-ca-certificates
             mingw-w64-x86_64-xz
             mingw-w64-x86_64-SDL2
             p7zip
@@ -239,12 +247,74 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target headrush-nam-gui --parallel
 
-      - run: mv build/headrush-nam-gui.exe build/headrush-nam-gui-windows.exe
+      # The exe alone doesn't run on a stock Windows box: it dynamically
+      # links libcurl/liblzma/SDL2/libwinpthread from MSYS2's MINGW64
+      # environment, none of which Windows ships or an end user has
+      # installed (see issue #7 -- "missing DLL" popups for exactly these
+      # four). Walk the exe's actual PE import table via `ldd` (resolves
+      # against this shell's /mingw64 the same way the dynamic loader
+      # would) and copy whatever it names from /mingw64/bin next to it,
+      # instead of hardcoding a DLL list that'd silently go stale the next
+      # time a dependency changes.
+      - name: Bundle runtime DLLs
+        run: |
+          set -euo pipefail
+          mkdir -p build/dist
+          cp build/headrush-nam-gui.exe build/dist/headrush-nam-gui-windows.exe
+          ldd build/headrush-nam-gui.exe \
+            | grep -i '/mingw64/' \
+            | awk '{print $3}' \
+            | sort -u \
+            | xargs -I{} cp {} build/dist/
+          ls -la build/dist
+
+      # MSYS2's mingw-w64 curl links OpenSSL (see the DLL list above --
+      # libssl-3-x64.dll / libcrypto-3-x64.dll), which needs a real CA
+      # bundle *file* to verify HTTPS certs -- unlike Windows-native
+      # schannel, it has no OS certificate store to fall back on. Without
+      # this the app runs (no missing-DLL popup) but every download fails
+      # with curl's own "Problem with the SSL CA cert (path? access
+      # rights?)". core/http_download.c points CURLOPT_CAINFO at
+      # "ca-bundle.crt" next to the exe on Windows -- ship it there.
+      - name: Bundle CA bundle
+        run: |
+          set -euo pipefail
+          CA_BUNDLE=$(pacman -Ql mingw-w64-x86_64-ca-certificates | awk '{print $2}' | grep -E '(ca-bundle\.crt|cacert\.pem)$' | head -1)
+          if [ -z "$CA_BUNDLE" ]; then
+            echo "Could not locate ca-bundle.crt/cacert.pem from mingw-w64-x86_64-ca-certificates package" >&2
+            pacman -Ql mingw-w64-x86_64-ca-certificates >&2
+            exit 1
+          fi
+          cp "$CA_BUNDLE" build/dist/ca-bundle.crt
+
+      # app/win_repack.c shells out to a 7z-compatible CLI to unpack/repack
+      # the stock updater's embedded 7z SFX archive. Never rely on "7z"
+      # being on the end user's PATH (most don't have any 7-Zip CLI on
+      # PATH, even those with the 7-Zip GUI installed) -- ship the real
+      # thing next to the exe instead. windows-latest runners come with
+      # 7-Zip preinstalled system-wide; reuse that copy (7z.exe needs
+      # 7z.dll alongside it -- it LoadLibrary()s it for its codecs) rather
+      # than MSYS2's `p7zip` package, which is an MSYS-POSIX-layer build
+      # that depends on msys-2.0.dll and isn't a standalone Windows binary.
+      - name: Bundle 7-Zip
+        run: |
+          set -euo pipefail
+          SEVENZIP_DIR="/c/Program Files/7-Zip"
+          if [ ! -f "$SEVENZIP_DIR/7z.exe" ] || [ ! -f "$SEVENZIP_DIR/7z.dll" ]; then
+            echo "7-Zip not found at '$SEVENZIP_DIR' -- windows-latest image may have changed" >&2
+            exit 1
+          fi
+          cp "$SEVENZIP_DIR/7z.exe" "$SEVENZIP_DIR/7z.dll" build/dist/
+
+      - name: Zip Windows dist
+        run: |
+          cd build/dist
+          7z a ../headrush-nam-gui-windows.zip .
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-windows
-          path: build/headrush-nam-gui-windows.exe
+          path: build/headrush-nam-gui-windows.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
