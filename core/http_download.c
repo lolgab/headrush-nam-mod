@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 static void set_err(char* err, size_t err_size, const char* fmt, ...)
 {
   if (!err || err_size == 0)
@@ -68,6 +72,31 @@ static int xferinfo_cb(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl
   return 0;
 }
 
+#ifdef _WIN32
+/* MSYS2's mingw-w64 curl links OpenSSL, not schannel -- it needs a real CA
+ * bundle *file* to verify HTTPS certs, and has no idea where one is on a
+ * plain Windows box (its compiled-in default path lives inside the MSYS2
+ * tree). Without this, every download fails with curl's verbatim
+ * "Problem with the SSL CA cert (path? access rights?)" -- point it at the
+ * ca-bundle.crt the release zip ships next to the exe instead. Static
+ * buffer: this runs once, well before any thread that could race it. */
+static const char* win_ca_bundle_path(void)
+{
+  static char path[MAX_PATH];
+  DWORD n = GetModuleFileNameA(NULL, path, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH)
+    return NULL;
+  char* slash = strrchr(path, '\\');
+  if (!slash)
+    return NULL;
+  size_t dir_len = (size_t)(slash - path) + 1;
+  if (dir_len + strlen("ca-bundle.crt") >= MAX_PATH)
+    return NULL;
+  strcpy(path + dir_len, "ca-bundle.crt");
+  return path;
+}
+#endif
+
 void nam_http_global_init(void)
 {
   curl_global_init(CURL_GLOBAL_DEFAULT);
@@ -104,6 +133,11 @@ bool nam_http_download(const char* url, NamDownloadProgressFn progress, void* pr
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &pctx);
   curl_easy_setopt(curl, CURLOPT_USERAGENT, "headrush-nam-mod-gui/1.0");
   curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
+#ifdef _WIN32
+  const char* ca_bundle = win_ca_bundle_path();
+  if (ca_bundle)
+    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle);
+#endif
 
   CURLcode res = curl_easy_perform(curl);
 

@@ -221,6 +221,7 @@ jobs:
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
             mingw-w64-x86_64-curl
+            mingw-w64-x86_64-ca-certificates
             mingw-w64-x86_64-xz
             mingw-w64-x86_64-SDL2
             p7zip
@@ -266,6 +267,17 @@ jobs:
             | sort -u \
             | xargs -I{} cp {} build/dist/
           ls -la build/dist
+
+      # MSYS2's mingw-w64 curl links OpenSSL (see the DLL list above --
+      # libssl-3-x64.dll / libcrypto-3-x64.dll), which needs a real CA
+      # bundle *file* to verify HTTPS certs -- unlike Windows-native
+      # schannel, it has no OS certificate store to fall back on. Without
+      # this the app runs (no missing-DLL popup) but every download fails
+      # with curl's own "Problem with the SSL CA cert (path? access
+      # rights?)". core/http_download.c points CURLOPT_CAINFO at
+      # "ca-bundle.crt" next to the exe on Windows -- ship it there.
+      - name: Bundle CA bundle
+        run: cp /mingw64/ssl/certs/ca-bundle.crt build/dist/ca-bundle.crt
 
       - name: Zip Windows dist
         run: |
