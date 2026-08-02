@@ -287,6 +287,25 @@ jobs:
           fi
           cp "$CA_BUNDLE" build/dist/ca-bundle.crt
 
+      # app/win_repack.c shells out to a 7z-compatible CLI to unpack/repack
+      # the stock updater's embedded 7z SFX archive. Never rely on "7z"
+      # being on the end user's PATH (most don't have any 7-Zip CLI on
+      # PATH, even those with the 7-Zip GUI installed) -- ship the real
+      # thing next to the exe instead. windows-latest runners come with
+      # 7-Zip preinstalled system-wide; reuse that copy (7z.exe needs
+      # 7z.dll alongside it -- it LoadLibrary()s it for its codecs) rather
+      # than MSYS2's `p7zip` package, which is an MSYS-POSIX-layer build
+      # that depends on msys-2.0.dll and isn't a standalone Windows binary.
+      - name: Bundle 7-Zip
+        run: |
+          set -euo pipefail
+          SEVENZIP_DIR="/c/Program Files/7-Zip"
+          if [ ! -f "$SEVENZIP_DIR/7z.exe" ] || [ ! -f "$SEVENZIP_DIR/7z.dll" ]; then
+            echo "7-Zip not found at '$SEVENZIP_DIR' -- windows-latest image may have changed" >&2
+            exit 1
+          fi
+          cp "$SEVENZIP_DIR/7z.exe" "$SEVENZIP_DIR/7z.dll" build/dist/
+
       - name: Zip Windows dist
         run: |
           cd build/dist
