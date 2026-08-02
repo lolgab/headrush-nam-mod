@@ -246,3 +246,12 @@ only on the mingw-w64 runtime, not MSYS's own POSIX emulation layer.
 provide the one library that doesn't. `CMakeLists.txt` builds it
 automatically on `WIN32` the same "build once per checkout, never commit"
 way `blobs/*` already works.
+
+"Depends only on the mingw-w64 runtime" is not the same as "runs standalone"
+-- `libcurl-4.dll`, `liblzma-5.dll`, `SDL2.dll`, and `libwinpthread-1.dll`
+are real DLLs a stock Windows install doesn't have (reported as four
+"missing DLL" popups on launch, [issue #7](https://github.com/lolgab/headrush-nam-mod/issues/7)).
+The CI job now runs `ldd` on the built `.exe`, copies whatever it resolves
+under `/mingw64/` next to it, and ships a `headrush-nam-gui-windows.zip`
+(exe + DLLs) instead of a bare `.exe` -- the DLLs must stay in the same
+folder as the `.exe` when run.

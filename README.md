@@ -11,6 +11,8 @@ confirmed on real hardware — see [docs/USAGE.md](docs/USAGE.md).
 
 1. Download `headrush-nam-gui` for your OS from the
    [GitHub Releases page](https://github.com/lolgab/headrush-nam-mod/releases).
+   **Windows**: it's a `.zip` — unzip it and keep the `.exe` together with
+   the `.dll` files next to it; they're required, not optional.
 2. Run it, pick your model (Pedalboard or MX5), and click **Install NAM
    Mod** — it downloads the official HeadRush firmware updater and builds a
    patched copy of it in the current directory.

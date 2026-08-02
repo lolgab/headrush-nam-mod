@@ -13,6 +13,13 @@ name: gui build
 # it from source instead -- confirmed to actually work by cross-compiling
 # it for mingw-w64 in Docker before writing that script (see
 # docs/BUILDING.md's verification section).
+#
+# "Depends only on the mingw-w64 runtime" still means real DLLs (libcurl,
+# liblzma, SDL2, libwinpthread) that a stock Windows box does not have --
+# they don't ship with Windows and MSYS2 isn't installed on end-user
+# machines. The exe alone 0xc000007b's / "missing DLL" pop-ups on launch
+# (see https://github.com/lolgab/headrush-nam-mod/issues/7); the build
+# must ship those DLLs alongside it, not just the .exe.
 on:
   push:
     branches: [main]
@@ -239,12 +246,36 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build --target headrush-nam-gui --parallel
 
-      - run: mv build/headrush-nam-gui.exe build/headrush-nam-gui-windows.exe
+      # The exe alone doesn't run on a stock Windows box: it dynamically
+      # links libcurl/liblzma/SDL2/libwinpthread from MSYS2's MINGW64
+      # environment, none of which Windows ships or an end user has
+      # installed (see issue #7 -- "missing DLL" popups for exactly these
+      # four). Walk the exe's actual PE import table via `ldd` (resolves
+      # against this shell's /mingw64 the same way the dynamic loader
+      # would) and copy whatever it names from /mingw64/bin next to it,
+      # instead of hardcoding a DLL list that'd silently go stale the next
+      # time a dependency changes.
+      - name: Bundle runtime DLLs
+        run: |
+          set -euo pipefail
+          mkdir -p build/dist
+          cp build/headrush-nam-gui.exe build/dist/headrush-nam-gui-windows.exe
+          ldd build/headrush-nam-gui.exe \
+            | grep -i '/mingw64/' \
+            | awk '{print $3}' \
+            | sort -u \
+            | xargs -I{} cp {} build/dist/
+          ls -la build/dist
+
+      - name: Zip Windows dist
+        run: |
+          cd build/dist
+          7z a ../headrush-nam-gui-windows.zip .
 
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-windows
-          path: build/headrush-nam-gui-windows.exe
+          path: build/headrush-nam-gui-windows.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
