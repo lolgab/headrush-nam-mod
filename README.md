@@ -5,7 +5,7 @@ Reverse-engineered firmware mod for the HeadRush Pedalboard, MX5, and Gigboard, 
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
 **Status**: a real, working NAM pedal today, via a hijacked pedal slot,
-confirmed on real hardware — see [docs/USAGE.md](docs/USAGE.md).
+confirmed on real hardware — see below.
 
 ## Install
 
@@ -35,12 +35,61 @@ confirmed on real hardware — see [docs/USAGE.md](docs/USAGE.md).
 
 Keep the unmodified updater the tool leaves alongside the patched one — you
 need it to recover if a flash goes wrong (see
-[docs/USAGE.md](docs/USAGE.md#recovery)).
+[docs/RECOVERY.md](docs/RECOVERY.md)).
+
+## Loading models
+
+Drop `.nam` files into their own **`/NAM`** folder on the device's USB drive
+(sibling to `Impulse Responses`, `Blocks`, `Rigs`, etc — create it yourself via
+the File Manager/USB transfer view if it doesn't exist yet). Files are sorted
+alphabetically and assigned one per whole percent of the Model knob's sweep,
+starting at 0% — name them with a 3-digit index prefix matching the knob
+percentage so the number on the file is the number on the knob:
+
+- `000 - First Model.nam`
+- `001 - Second Model.nam`
+- `002 - Third Model.nam`
+
+With 3 files as above, 0%-2% select them in order; the rest of the knob's
+sweep (3%-100%) is silence — no file is assigned there, so the pedal outputs
+nothing. This is deliberate: it keeps each file pinned to a fixed knob
+position regardless of how many other files are on the drive, instead of the
+position drifting every time you add or remove one.
+
+## The pedal
+
+On the device, add the **Anxiety OD** pedal.
+
+| Knob | Function |
+|---|---|
+| **DRIVE** | selects/scans `.nam` model files |
+| **TONE** | input trim |
+| **LEVEL** | output trim |
+
+On the **Pedalboard**, the on-screen knob labels are relabeled to match
+(Drive → Model, Tone → Inp, Level → Outp). On the **MX5** and **Gigboard**
+they keep their stock **Drive / Tone / Level** names but do exactly the same
+thing. The pedal's own name stays **Anxiety OD** on every device — that
+string is not renamed (tried once, breaks the pedal on real hardware).
+
+This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
+on every instance. That's fine — Anxiety OD **v2** is still available for a
+real overdrive.
+
+## Supported models
+
+| Device | Status |
+|---|---|
+| HeadRush **Pedalboard** | confirmed on real hardware |
+| HeadRush **MX5** | confirmed on real hardware |
+| HeadRush **Gigboard** | confirmed on real hardware |
+
+**Only flash the update file built for _your exact model and firmware_** —
+flashing another model's file will almost certainly brick the device.
 
 ## Documentation
 
-- [docs/USAGE.md](docs/USAGE.md) — which pedal to add, what the knobs do,
-  how to name/place `.nam` model files, supported models, recovery mode.
+- [docs/RECOVERY.md](docs/RECOVERY.md) — what to do if a flash goes wrong.
 - [docs/TECHNICAL.md](docs/TECHNICAL.md) — how the hijack works under the
   hood.
 - [docs/BUILDING.md](docs/BUILDING.md) — building `headrush-nam-gui` from
