@@ -47,20 +47,12 @@ real overdrive.
 
 | Device | Status |
 |---|---|
-| HeadRush **Pedalboard** | confirmed on real hardware (default) |
+| HeadRush **Pedalboard** | confirmed on real hardware |
 | HeadRush **MX5** | confirmed on real hardware |
-| HeadRush **Gigboard** | **⚠️ do not use — see warning below** |
+| HeadRush **Gigboard** | confirmed on real hardware |
 
 **Only flash the update file built for _your exact model and firmware_** —
 flashing another model's file will almost certainly brick the device.
-
-### ⚠️ Gigboard: DO NOT FLASH
-
-There is no known way to recover a Gigboard from a bad flash — its stock
-firmware-update flow is entirely UI-driven (Global Settings → Firmware Update
-on the touchscreen), with no documented footswitch combo that forces
-recovery/firmware-update mode. Never flash a modified image to a Gigboard you
-aren't prepared to lose.
 
 ## Recovery
 

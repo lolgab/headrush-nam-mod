@@ -27,8 +27,8 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
     .orig_process_fn = 0x302ed0,
     .qml_rename_count = 0,
   },
-  /* HeadRush Gigboard 2.7 -- derived and cross-checked by static analysis
-   * only, NOT YET flashed to a real Gigboard. See model_targets.py. */
+  /* HeadRush Gigboard 2.7 -- confirmed working on real hardware.
+   * See model_targets.py. */
   {
     .name = "gigboard",
     .match_compatible = "inmusic,hg02",
@@ -56,7 +56,10 @@ const ModelTarget* nam_select_target(const char* model_name, const char* compati
     if (!t)
     {
       if (reason_out)
-        *reason_out = NULL;
+      {
+        snprintf(reason_buf, sizeof(reason_buf), "unknown --model %s", model_name);
+        *reason_out = reason_buf;
+      }
       return NULL;
     }
     /* Explicit selection (--model on the CLI, or the GUI's own model
@@ -86,9 +89,9 @@ const ModelTarget* nam_select_target(const char* model_name, const char* compati
   if (reason_out)
   {
     snprintf(reason_buf, sizeof(reason_buf),
-             "defaulted to %s (compatible=%s matched no specific target; pass --model to override)",
-             NAM_MODEL_TARGETS[NAM_DEFAULT_TARGET_INDEX].name, compatible ? compatible : "(none)");
+             "compatible=%s matched no specific target; pass --model explicitly (pedalboard|mx5|gigboard)",
+             compatible ? compatible : "(none)");
     *reason_out = reason_buf;
   }
-  return &NAM_MODEL_TARGETS[NAM_DEFAULT_TARGET_INDEX];
+  return NULL;
 }

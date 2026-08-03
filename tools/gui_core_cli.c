@@ -5,7 +5,7 @@
  * core/tempdir.h). Local dev/debugging tool only -- not built or shipped
  * by CI, see docs/BUILDING.md.
  *
- * usage: gui-core-cli <stock.img> <out.img> [--model pedalboard|mx5|gigboard]
+ * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
  *                      [--keep-work-dir]
  */
 #include "patch_pipeline.h"
@@ -67,7 +67,7 @@ static void print_progress(const char* message, void* user_data)
 int main(int argc, char** argv)
 {
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> [--model pedalboard|mx5|gigboard] [--keep-work-dir]", argv[0]);
+    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--keep-work-dir]", argv[0]);
 
   const char* input_img = argv[1];
   const char* output_img = argv[2];
@@ -83,6 +83,9 @@ int main(int argc, char** argv)
     else
       die("unknown argument: %s", argv[i]);
   }
+
+  if (!model_name)
+    die("--model is required (pedalboard|mx5|gigboard) -- no default target");
 
   char workdir[NAM_TEMPDIR_MAX_PATH];
   char tempdir_err[256];

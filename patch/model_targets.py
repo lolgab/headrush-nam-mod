@@ -14,9 +14,11 @@ on the Pedalboard and MX5 because it's the same DSPModule<AnxietyOD,...> class
 compiled into both; a future model that differs would move them here.
 
 Auto-detection matches the Update.img root `compatible` string. `--model`
-always overrides. patch_gonkulator.py's slot-value sanity check (the slot
-must already hold `orig_process_fn`) is the backstop that makes a
-wrong-target selection refuse rather than corrupt the binary.
+always overrides. There is no default target: an unrecognized/absent
+`compatible` with no explicit `--model` is an error. patch_gonkulator.py's
+slot-value sanity check (the slot must already hold `orig_process_fn`) is
+the backstop that makes a wrong-target selection refuse rather than corrupt
+the binary.
 """
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
@@ -26,7 +28,7 @@ from typing import List, Optional, Tuple
 class ModelTarget:
     name: str
     # Exact Update.img root `compatible` string for auto-detect (None = never
-    # auto-matches; only reachable via explicit --model or as the default).
+    # auto-matches; only reachable via explicit --model).
     match_compatible: Optional[str]
 
     # Anxiety OD (v1) hijack, re-derived per `Evil` (see patch_gonkulator.py):
@@ -41,8 +43,6 @@ class ModelTarget:
 
 
 # HeadRush Pedalboard 2.7 -- the original, real-hardware-confirmed target.
-# Also the DEFAULT_TARGET, so an unrecognized `compatible` still falls here
-# (guarded by patch_gonkulator.py's slot-value check).
 PEDALBOARD_2_7 = ModelTarget(
     name="pedalboard",
     match_compatible="inmusic,mg01",
@@ -92,14 +92,10 @@ MX5_2_7 = ModelTarget(
 # Patch/Anxiety OD"` QML source blob was found (Gigboard's Evil only embeds QML
 # source for a handful of other pedals) -- knob names come from a shared string
 # pool, so relabeling would hit every pedal.
-# STATUS: derived and cross-checked by static analysis only (same method that
-# nailed Pedalboard/MX5's addresses) -- NOT YET flashed to a real Gigboard. No
-# publicly documented footswitch-hold hardware recovery mode was found for the
-# Gigboard either (unlike Pedalboard's "1 & 8" / MX5's "first two"); the stock
-# firmware-update path is UI-driven (Global Settings > Firmware Update). Until
-# a real-device flash + recovery test confirms both, treat this target as
-# unverified and do not flash a modified image to a Gigboard you can't afford
-# to risk.
+# STATUS: confirmed working on real Gigboard hardware. No publicly documented
+# footswitch-hold hardware recovery mode was found for the Gigboard (unlike
+# Pedalboard's "1 & 8" / MX5's "first two"); the stock firmware-update path is
+# UI-driven (Global Settings > Firmware Update).
 GIGBOARD_2_7 = ModelTarget(
     name="gigboard",
     match_compatible="inmusic,hg02",
@@ -109,13 +105,12 @@ GIGBOARD_2_7 = ModelTarget(
 )
 
 TARGETS = {t.name: t for t in (PEDALBOARD_2_7, MX5_2_7, GIGBOARD_2_7)}
-DEFAULT_TARGET = "pedalboard"
 
 
 def select_target(model_name: Optional[str], compatible: Optional[str]):
     """Return (ModelTarget, reason_str). Explicit model_name wins; else auto-detect
-    by `compatible`; else fall back to the default (Pedalboard) -- safe because
-    patch_gonkulator.py refuses if the slot doesn't hold the expected orig fn."""
+    by `compatible`. No default target: raises if neither resolves a target,
+    forcing an explicit --model."""
     if model_name:
         if model_name not in TARGETS:
             raise KeyError(
@@ -124,6 +119,6 @@ def select_target(model_name: Optional[str], compatible: Optional[str]):
     matches = [t for t in TARGETS.values() if t.match_compatible and t.match_compatible == compatible]
     if len(matches) == 1:
         return matches[0], f"auto-detected from compatible={compatible!r}"
-    return TARGETS[DEFAULT_TARGET], (
-        f"defaulted to {DEFAULT_TARGET} (compatible={compatible!r} matched no "
-        f"specific target; pass --model to override)")
+    raise KeyError(
+        f"compatible={compatible!r} matched no specific target; pass --model "
+        f"explicitly ({', '.join(sorted(TARGETS))})")

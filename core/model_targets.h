@@ -36,13 +36,14 @@ typedef struct
 
 #define NAM_MODEL_COUNT 3
 extern const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT];
-#define NAM_DEFAULT_TARGET_INDEX 0 /* pedalboard */
 
-/* model_name may be NULL (falls through to compatible-string auto-detect,
- * then to NAM_DEFAULT_TARGET_INDEX). Returns NULL only if model_name is
- * non-NULL and unrecognized. reason_out (if non-NULL) receives a static
- * string describing how the target was chosen, for logging -- mirrors
- * select_target()'s (target, reason) return in model_targets.py. */
+/* model_name may be NULL (falls through to compatible-string auto-detect).
+ * Returns NULL if model_name is non-NULL and unrecognized, OR if model_name
+ * is NULL and compatible matched no specific target -- there is no default
+ * fallback, callers must pass an explicit --model in that case. reason_out
+ * (if non-NULL) always receives a static string: on success, how the target
+ * was chosen; on failure (NULL return), why, for use in the error message.
+ * Mirrors select_target()'s (target, reason) return in model_targets.py. */
 const ModelTarget* nam_select_target(const char* model_name, const char* compatible, const char** reason_out);
 
 #endif

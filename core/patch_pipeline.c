@@ -133,7 +133,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   const ModelTarget* target = nam_select_target(model_name, metadata.compatible, &reason);
   if (!target)
   {
-    set_err(err, err_size, "unknown --model %s", model_name);
+    set_err(err, err_size, "%s", reason);
     goto cleanup;
   }
   if (reason)
