@@ -1,6 +1,6 @@
 # Technical design: the Anxiety OD hijack
 
-Takes a stock HeadRush Pedalboard or MX5 firmware update file (`Update.img`)
+Takes a stock HeadRush Pedalboard, MX5, or Gigboard firmware update file (`Update.img`)
 and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
 `process()` function, replacing its overdrive DSP with NAM inference. The
 model is auto-detected from the `Update.img`'s `compatible` string (see
@@ -11,18 +11,19 @@ the `Evil` binary in the `Update.img` (the Anxiety OD vtable slot must
 already hold the expected `process()` address), so a wrong model / failed
 auto-detect fails loudly rather than producing a bad image.
 
-The MX5 port reuses everything structural (same RK3288 armv7 hard-float non-PIE
-`Evil`, same FIT/ext2/launcher layout, same Anxiety OD v1 sacrificial pedal);
-only the absolute addresses differ, re-derived from the MX5 `Evil` the way
-`patch/patch_gonkulator.py`'s docstring documents. One thing is not ported: the
-on-screen knob relabel — the MX5's labels come from a shared string pool, not a
-per-pedal QML blob, so on the MX5 the knobs keep their **Drive / Tone / Level**
-names while doing model-select / input-trim / output-trim.
+The MX5 and Gigboard ports reuse everything structural (same RK3288 armv7
+hard-float non-PIE `Evil`, same FIT/ext2/launcher layout, same Anxiety OD v1
+sacrificial pedal); only the absolute addresses differ, re-derived from each
+`Evil` the way `patch/patch_gonkulator.py`'s docstring documents. One thing is
+not ported to either: the on-screen knob relabel — the MX5's and Gigboard's
+labels come from a shared string pool, not a per-pedal QML blob, so on the
+MX5 and Gigboard the knobs keep their **Drive / Tone / Level** names while
+doing model-select / input-trim / output-trim.
 
 ## Knob implementation
 
-Anxiety OD's on-screen labels are patched (on the **Pedalboard** only — the MX5
-keeps its stock labels) to match what they now do:
+Anxiety OD's on-screen labels are patched (on the **Pedalboard** only — the
+MX5 and Gigboard keep their stock labels) to match what they now do:
 
 | Original | Function |
 |---|---|

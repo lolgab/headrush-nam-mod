@@ -1,6 +1,6 @@
-# HeadRush Pedalboard & MX5 — Neural Amp Modeler (NAM) mod
+# HeadRush Pedalboard, MX5 & Gigboard — Neural Amp Modeler (NAM) mod
 
-Reverse-engineered firmware mod for the HeadRush Pedalboard and MX5, adding
+Reverse-engineered firmware mod for the HeadRush Pedalboard, MX5, and Gigboard, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
@@ -20,7 +20,7 @@ confirmed on real hardware — see [docs/USAGE.md](docs/USAGE.md).
 
    Without these, `headrush-nam-gui` fails to launch with a
    `Library not loaded` error.
-2. Run it, pick your model (Pedalboard or MX5), and click **Install NAM
+2. Run it, pick your model (Pedalboard, MX5, or Gigboard), and click **Install NAM
    Mod** — it downloads the official HeadRush firmware updater and builds a
    patched copy of it in the current directory.
 3. Put your device in firmware-update mode. See

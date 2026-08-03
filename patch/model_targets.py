@@ -10,8 +10,9 @@ Everything else about the hijack is shared across every supported `Evil` and
 lives as a constant in the code that uses it -- the process() vtable slot (8) and
 vaddr->file base (0x8000) in patch_gonkulator.py, and the engine-object field
 offsets (Drive/Tone/Level/bypass) in nam_hook.cpp. Those happen to be identical
-on the Pedalboard and MX5 because it's the same DSPModule<AnxietyOD,...> class
-compiled into both; a future model that differs would move them here.
+across the Pedalboard, MX5, and Gigboard because it's the same
+DSPModule<AnxietyOD,...> class compiled into all three; a future model that
+differs would move them here.
 
 Auto-detection matches the Update.img root `compatible` string. `--model`
 always overrides. There is no default target: an unrecognized/absent
