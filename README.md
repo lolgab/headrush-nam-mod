@@ -56,6 +56,9 @@ nothing. This is deliberate: it keeps each file pinned to a fixed knob
 position regardless of how many other files are on the drive, instead of the
 position drifting every time you add or remove one.
 
+Reboot device after adding/changing files via USB — new models don't show up
+till restart.
+
 ## The pedal
 
 On the device, add the **Anxiety OD** pedal.
