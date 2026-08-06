@@ -658,8 +658,12 @@ void switch_model_in_background(ModelState& s, float raw)
   // Don't start a new background load while a previous one's result is
   // still being duck-and-switched in by the audio thread, or is sitting
   // unpicked-up in the pending slot -- see ModelState's own comment on why
-  // dsp[]/pending_dsp[] are each owned by exactly one thread.
-  if (s.fade_state.load(std::memory_order_relaxed) != 0 || s.pending_ready.load(std::memory_order_acquire))
+  // dsp[]/pending_dsp[] are each owned by exactly one thread. fade_state==3
+  // (already muted, waiting on an earlier request) is allowed through: the
+  // pickup block's stale-pending-drop path calls back in here to replace a
+  // load the knob has already moved past, while staying muted throughout.
+  const int fade_state_now = s.fade_state.load(std::memory_order_relaxed);
+  if ((fade_state_now != 0 && fade_state_now != 3) || s.pending_ready.load(std::memory_order_acquire))
     return;
 
   bool expected = false;
@@ -791,8 +795,29 @@ void switch_model_in_background(ModelState& s, float raw)
           std::vector<float> scratch(kPrewarmBlockSize, 0.0f);
           float* in_arr[1] = {silence.data()};
           float* out_arr[1] = {scratch.data()};
+          // Real-hardware symptom: audible cracks/artifacts during this
+          // window even though nam_process_gonk now mutes the audio thread
+          // (fade_state==3, plain silence, no dsp->process() calls at all)
+          // for the ENTIRE duration of this loop -- so the audio thread
+          // itself has nothing expensive to do, yet still isn't getting
+          // scheduled reliably. On a single ARM core, a tight, syscall-free
+          // loop only actually gets preempted at a scheduler tick boundary
+          // (can be several ms on an embedded kernel's HZ), regardless of
+          // this thread's niceness -- niceness affects how MUCH CPU share a
+          // thread gets over time, not how promptly it yields the CPU
+          // mid-burst. Real hardware's own audio callback period is ~1ms
+          // (kCalibrationBlockSize=48 "matches observed real hardware
+          // numFrames"), so any uninterrupted burst much longer than that
+          // risks missing its wakeup -- an underrun/dropout, heard as a
+          // crack. Yielding every 8 blocks (~21ms bursts) was too coarse;
+          // yield after EVERY block instead (~2.7ms bursts, close to the
+          // real audio period) so the gap between forced yields is never
+          // much bigger than one real audio callback's worth of work.
           for (int32_t done = 0; done < kPrewarmSamples; done += kPrewarmBlockSize)
+          {
             d->process(in_arr, out_arr, kPrewarmBlockSize);
+            usleep(500);
+          }
         }
       }
       // Stage into pending_dsp, NOT dsp[] directly -- the audio thread
@@ -856,40 +881,63 @@ extern "C" void nam_process(void* this_)
 // tracking. Tone (0x548) and Level (0x520) feed input/output trim; bypass
 // is this_+0x26b. See nam_process_gonk below for how each is used.
 
-// Length of each half (fade-out, fade-in) of a model-switch transition.
-// ~100ms at 48kHz. Originally 20ms (960 samples); real-hardware testing
-// still showed a click at that length, requested to be made longer. Also
-// combined with a fix for a separate, likely bigger contributor: the new
-// model wasn't actually warmed up before the fade-in reached it (see the
-// manual prewarm block in switch_model_in_background) -- a cold WaveNet
-// model's first samples are a real source of audible artifacts independent
-// of fade length. True crossfading (running old and new models
-// simultaneously and blending outputs) was considered and rejected: this
-// device's ARM core is already tightly budgeted for a single model (see
-// calibrate_slimmable_quality's own comment), and running two at once
-// risks a worse dropout than the glitch this is meant to fix. Duck-and-
-// switch never runs two models at once, at the cost of a brief dip instead
-// of a true blend.
+// Model-switch transition used to use one LINEAR ramp length for both
+// halves (fade-out and fade-in). A linear ramp's gain is flat (slope 0)
+// right up until the fade starts, then jumps to a constant nonzero slope --
+// a discontinuity in the slope itself, which is an impulsive, broadband
+// ("click"/"zz") artifact independent of whatever the model is doing.
+// Shortening that old single length 4800->128 samples (~2.7ms) was flashed
+// to real hardware and made the click WORSE, not better -- consistent with
+// this theory (steeper ramp = bigger slope jump = louder click), not with
+// "fade wasn't short enough yet". Do not reintroduce a single-length linear
+// ramp; see raised_cosine_ramp() below, which has zero slope at both
+// endpoints and removes the discontinuity regardless of length.
 //
-// Overridable via NAM_FADE_LEN_SAMPLES -- host-side wav testing only, to
-// sweep this value against real .nam models without a hardware/QEMU round
-// trip each time.
+// Fade-out and fade-in are independently sized, both 100ms:
+// - Fade-out: tried short (~5ms) once the ramp-shape fix above stopped it
+//   clicking on its own, but real hardware still showed artifacts -- see
+//   nam_process_gonk's own comment: the background load/calibrate/prewarm is
+//   now deliberately NOT started until fade-out has fully finished (rather
+//   than concurrently with it), so a slower, unhurried 100ms duck costs
+//   nothing extra in when the new model becomes available, and avoids
+//   whatever a too-fast duck of a still-live model was doing on its own.
+// - Fade-in (100ms): the new model was
+//   prewarmed on SILENCE (see switch_model_in_background's manual prewarm
+//   block) before this fade-in ever starts, so it's not truly "cold" --
+//   still, ramping the model's INPUT, not just its output (see the
+//   fade_state==2 branch below), avoids handing it an instant full-amplitude
+//   step, which is a plausible source of a small transient/overshoot even
+//   from a silence-settled state. 100ms is a starting guess, not yet
+//   hardware-confirmed at this specific value -- shorten via
+//   NAM_FADE_IN_LEN_SAMPLES for host-side comparison, but only trust a real
+//   flash+listen test before shipping a change here.
 //
-// Default kept at the real-hardware-confirmed 4800 (100ms). Host-side
-// measurement (dlopen'd libnam_hook.so, real nam_process_gonk calls, real
-// .nam models, real wav, no device/QEMU) suggested click size stays flat
-// down to ~40 samples, and a build with the default dropped to 128
-// (~2.7ms) was flashed to real hardware -- it reintroduced audible
-// distortion on model switch that the 4800-sample default did not have.
-// The device's real audio thread jitter/analog output stage evidently
-// doesn't behave like the host-side simulation here, so do not lower this
-// default again without re-confirming on real hardware, not just host wav
-// sweeps.
-int32_t fade_len_samples()
+// Both overridable via NAM_FADE_OUT_LEN_SAMPLES / NAM_FADE_IN_LEN_SAMPLES --
+// host-side wav testing only, to sweep these without a hardware/QEMU round
+// trip each time. Do not lower the shipped defaults without re-confirming on
+// real hardware, not just host wav sweeps -- see the linear-ramp history
+// above for why host-side sweeps alone were previously misleading.
+int32_t fade_out_len_samples()
 {
-  if (const char* env = std::getenv("NAM_FADE_LEN_SAMPLES"))
+  if (const char* env = std::getenv("NAM_FADE_OUT_LEN_SAMPLES"))
     return std::max(1, std::atoi(env));
-  return 4800;
+  return 4800; // 100ms at 48kHz
+}
+
+int32_t fade_in_len_samples()
+{
+  if (const char* env = std::getenv("NAM_FADE_IN_LEN_SAMPLES"))
+    return std::max(1, std::atoi(env));
+  return 4800; // 100ms at 48kHz
+}
+
+// Equal-power-ish raised-cosine ramp: 0 at progress<=0, 1 at progress>=len,
+// smooth (zero slope) at both ends. Used for both fade-out (as 1-this) and
+// fade-in so neither transition has the linear ramp's slope discontinuity.
+float raised_cosine_ramp(int32_t progress, int32_t len)
+{
+  const float x = std::clamp(static_cast<float>(progress) / static_cast<float>(len), 0.0f, 1.0f);
+  return 0.5f * (1.0f - std::cos(static_cast<float>(M_PI) * x));
 }
 
 extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
@@ -903,7 +951,8 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     numChannels = kMaxChannels;
 
   auto& s = state_for(this_); // per-engine-instance state -- see its own comment
-  const int32_t kFadeLenSamples = fade_len_samples();
+  const int32_t kFadeOutLenSamples = fade_out_len_samples();
+  const int32_t kFadeInLenSamples = fade_in_len_samples();
 
   const float drive_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x534); // model select
   const float tone_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x548);   // input trim
@@ -969,13 +1018,31 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     else if (target_idx != -2 && target_idx != s.active_index.load(std::memory_order_acquire)
              && now_ms() - s.candidate_since_ms >= kKnobSettleMs)
     {
-      switch_model_in_background(s, drive_raw);
+      // Start ducking the about-to-be-replaced model out RIGHT NOW --
+      // deliberately NOT calling switch_model_in_background here yet. That
+      // background construct/calibrate/prewarm work (still real, audible
+      // artifacts even at a fast duck when it overlapped a still-live old
+      // model, per real-hardware testing) is now only kicked off once this
+      // fade-out has fully completed and the old model is truly silent --
+      // see the fade_state==1 completion block below, which calls
+      // switch_model_in_background itself once fade_progress reaches
+      // kFadeOutLenSamples.
+      if (s.fade_state.load(std::memory_order_relaxed) == 0)
+      {
+        s.fade_state.store(1, std::memory_order_relaxed);
+        s.fade_progress = 0;
+      }
     }
   }
 
   // Pick up a finished background load, if any. Only the audio thread ever
-  // installs into dsp[] -- see ModelState's own comment.
-  if (s.fade_state.load(std::memory_order_relaxed) == 0 && s.pending_ready.load(std::memory_order_acquire))
+  // installs into dsp[] -- see ModelState's own comment. fade_state==3 means
+  // the old model already faded all the way out and the background thread
+  // was kicked off only then (see fade_state==1's completion above);
+  // fade_state==0 covers only the first-ever load (nothing was playing to
+  // duck, so no fade-out/mute step exists for it).
+  const int fs_for_pickup = s.fade_state.load(std::memory_order_relaxed);
+  if ((fs_for_pickup == 0 || fs_for_pickup == 3) && s.pending_ready.load(std::memory_order_acquire))
   {
     // The knob can move on while a load (esp. a first-time-this-boot
     // calibration, which is much slower than a cached one) is still in
@@ -992,6 +1059,10 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
         s.pending_dsp[i].reset();
       s.pending_ready.store(false, std::memory_order_release);
       switch_model_in_background(s, drive_raw);
+      // If fs_for_pickup==3 we're already muted -- stay that way until the
+      // fresh request above lands here again. If fs_for_pickup==0, nothing
+      // audible is playing here either way (see comment above), so no fade
+      // is needed just for dropping the stale load.
     }
     else if (!ready)
     {
@@ -1004,10 +1075,17 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.ready.store(true, std::memory_order_release);
       ready = true;
     }
-    else
+    else // fs_for_pickup == 3, ready == true, not stale -- the only remaining case
     {
-      s.fade_state.store(1, std::memory_order_relaxed); // start fading OUT the current model
+      // Old model already faded all the way out before this load was even
+      // requested (see fade_state==1's completion above) -- swap in the new
+      // model and fade it straight IN. No fade-OUT needed here.
+      for (int i = 0; i < kMaxChannels; ++i)
+        s.dsp[i] = std::move(s.pending_dsp[i]);
+      s.active_index.store(s.pending_index, std::memory_order_release);
+      s.pending_ready.store(false, std::memory_order_release);
       s.fade_progress = 0;
+      s.fade_state.store(s.pending_index < 0 ? 0 : 2, std::memory_order_relaxed);
     }
   }
 
@@ -1081,24 +1159,43 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.dsp[ch]->process(in_arr, out_arr, numFrames);
       for (int32_t i = 0; i < numFrames; ++i)
       {
-        const float g = 1.0f - std::min(1.0f, static_cast<float>(s.fade_progress + i) / kFadeLenSamples);
+        const float g = 1.0f - raised_cosine_ramp(s.fade_progress + i, kFadeOutLenSamples);
         output[ch][i] *= g;
       }
     }
     s.fade_progress += numFrames;
-    if (s.fade_progress >= kFadeLenSamples)
+    if (s.fade_progress >= kFadeOutLenSamples)
     {
-      // Faded to silence -- safe to swap the model now, no audible click.
-      for (int i = 0; i < kMaxChannels; ++i)
-        s.dsp[i] = std::move(s.pending_dsp[i]);
-      s.active_index.store(s.pending_index, std::memory_order_release);
-      s.pending_ready.store(false, std::memory_order_release);
       s.fade_progress = 0;
-      // If the new target is itself silence (no file assigned to this step),
-      // there's no model to fade IN -- go straight back to steady state,
-      // where the fade_state==0 branch above already renders silence.
-      s.fade_state.store(s.pending_index < 0 ? 0 : 2, std::memory_order_relaxed);
+      // Old model is now fully silent -- re-check the knob's CURRENT
+      // position (it can wander during the 100ms duck) before doing
+      // anything else.
+      const int current_idx = knob_value_to_index(drive_raw, static_cast<int>(g_cached_models.size()));
+      if (current_idx == s.active_index.load(std::memory_order_acquire))
+      {
+        // Knob settled back on the model we just faded out -- it's still
+        // loaded in dsp[] (never touched during the duck), so just fade it
+        // back IN directly. No background work needed at all.
+        s.fade_state.store(s.active_index.load(std::memory_order_relaxed) < 0 ? 0 : 2,
+                            std::memory_order_relaxed);
+      }
+      else
+      {
+        // Only NOW -- with the old model fully silent, guaranteed no
+        // overlap with anything the audio thread is doing -- kick off the
+        // new model's construct/calibrate/prewarm. See fade_state==3 below
+        // for the muted wait, and switch_model_in_background's own guard,
+        // which allows starting from fade_state==3.
+        s.fade_state.store(3, std::memory_order_relaxed);
+        switch_model_in_background(s, drive_raw);
+      }
     }
+  }
+  else if (fade_state == 3) // muted: old model already ducked out, new one still loading
+  {
+    for (uint32_t ch = 0; ch < numChannels; ++ch)
+      if (input[ch] && output[ch])
+        std::fill(output[ch], output[ch] + numFrames, 0.0f);
   }
   else // fade_state == 2: fading IN the newly-installed model
   {
@@ -1106,17 +1203,26 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     {
       if (!input[ch] || !output[ch])
         continue;
+      // Fade the model's INPUT in too, not just its output: the new model
+      // was just prewarmed on silence (see switch_model_in_background), so
+      // its internal state is cold. Feeding it a smooth ramp-up instead of
+      // an instant full-amplitude step avoids shocking a nonlinear model
+      // (WaveNet/LSTM) with a discontinuous input it never saw in training.
+      // The output ramp is kept too (belt-and-suspenders against any
+      // residual near-zero-input bias/noise floor in the model itself).
+      for (int32_t i = 0; i < numFrames; ++i)
+        output[ch][i] *= raised_cosine_ramp(s.fade_progress + i, kFadeInLenSamples);
       float* in_arr[1] = {output[ch]};
       float* out_arr[1] = {output[ch]};
       s.dsp[ch]->process(in_arr, out_arr, numFrames);
       for (int32_t i = 0; i < numFrames; ++i)
       {
-        const float g = std::min(1.0f, static_cast<float>(s.fade_progress + i) / kFadeLenSamples);
+        const float g = raised_cosine_ramp(s.fade_progress + i, kFadeInLenSamples);
         output[ch][i] *= g;
       }
     }
     s.fade_progress += numFrames;
-    if (s.fade_progress >= kFadeLenSamples)
+    if (s.fade_progress >= kFadeInLenSamples)
     {
       s.fade_progress = 0;
       s.fade_state.store(0, std::memory_order_relaxed); // transition complete
