@@ -100,6 +100,20 @@ flashing another model's file will almost certainly brick the device.
 - [docs/ADDITIVE_PEDAL.md](docs/ADDITIVE_PEDAL.md) — research notes on an
   unshipped, non-hijacking pedal design.
 
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and noninfringement. In no event shall the
+authors or contributors be liable for any claim, damages, or other liability
+arising from, out of, or in connection with the software or the use or other
+dealings in the software.
+
+Flashing custom firmware carries an inherent risk of bricking your device.
+By using this software, you accept full responsibility for any damage to
+your hardware, including but not limited to a failed flash, data loss, or
+voided manufacturer warranty. Proceed at your own risk.
+
 ## License
 
 The patch scripts and glue code in this repo are licensed under the
