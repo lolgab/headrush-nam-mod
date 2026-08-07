@@ -106,10 +106,18 @@ jobs:
 
       - run: mv build/headrush-nam-gui build/headrush-nam-gui-linux
 
+      # GitHub Releases strips unix permission bits from raw file assets --
+      # a bare binary downloads with no exec bit set. tar preserves the
+      # mode itself, so extracting the archive restores +x.
+      - name: Package (tar.gz, preserves exec bit)
+        run: |
+          chmod +x build/headrush-nam-gui-linux
+          tar -czf build/headrush-nam-gui-linux.tar.gz -C build headrush-nam-gui-linux
+
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-linux
-          path: build/headrush-nam-gui-linux
+          path: build/headrush-nam-gui-linux.tar.gz
 
   # macos-latest is an Apple Silicon (arm64) runner, so getting a real
   # x86_64 build too (for Intel Macs) means building twice and lipo-ing the
@@ -198,10 +206,17 @@ jobs:
             build-arm64/headrush-nam-gui build-x86_64/headrush-nam-gui
           lipo -info build-arm64/headrush-nam-gui-macos
 
+      # Same as the Linux job -- GitHub Releases strips exec bit from raw
+      # assets, tar preserves it.
+      - name: Package (tar.gz, preserves exec bit)
+        run: |
+          chmod +x build-arm64/headrush-nam-gui-macos
+          tar -czf build-arm64/headrush-nam-gui-macos.tar.gz -C build-arm64 headrush-nam-gui-macos
+
       - uses: actions/upload-artifact@v4
         with:
           name: headrush-nam-gui-macos
-          path: build-arm64/headrush-nam-gui-macos
+          path: build-arm64/headrush-nam-gui-macos.tar.gz
 
   build-windows:
     needs: build-blobs
@@ -328,8 +343,6 @@ jobs:
           pattern: headrush-nam-gui-*
           path: artifacts
           merge-multiple: true
-
-      - run: chmod +x artifacts/*
 
       - uses: softprops/action-gh-release@v2
         with:
