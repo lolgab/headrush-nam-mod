@@ -65,6 +65,7 @@ add_library(nam_gui_core STATIC
   core/http_download.c
   core/zip_reader.c
   core/tempdir.c
+  core/nam_library.c
   ${NAM_BLOBS_GENERATED_SOURCES}
   third_party/sha1/sha1.c
   third_party/miniz/miniz.c
@@ -233,6 +234,11 @@ add_custom_target(nam_gui_blobs ALL DEPENDS ${NAM_BLOBS})
 add_executable(gui-core-cli tools/gui_core_cli.c)
 target_link_libraries(gui-core-cli PRIVATE nam_gui_core)
 add_dependencies(gui-core-cli nam_gui_blobs)
+
+# "Prepare NAM Library" CLI (core/nam_library.c) -- no Update.img/blobs
+# dependency at all, so it doesn't need nam_gui_blobs.
+add_executable(nam-library-cli tools/nam_library_cli.c)
+target_link_libraries(nam-library-cli PRIVATE nam_gui_core)
 
 # Milestone 3: Nuklear (public domain, vendored header) + SDL2 GUI wrapping
 # nam_gui_core. Linux/simplest-output-path only for now (no .app/.exe

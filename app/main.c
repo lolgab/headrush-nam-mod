@@ -28,6 +28,7 @@
 
 #include "http_download.h"
 #include "model_targets.h"
+#include "nam_library.h"
 #include "patch_pipeline.h"
 #include "tempdir.h"
 #include "zip_reader.h"
@@ -71,8 +72,95 @@ typedef enum
   APP_STATE_PICK,
   APP_STATE_RUNNING,
   APP_STATE_DONE,
-  APP_STATE_ERROR
+  APP_STATE_ERROR,
+  APP_STATE_LIBRARY
 } AppState;
+
+/* "Prepare NAM Library" screen (core/nam_library.h). Unlike the install
+ * flow above, drive detection/scanning/renaming/.block generation are all
+ * fast local filesystem operations -- no worker thread, no progress log,
+ * just plain synchronous calls from the UI thread on each button press.
+ * There's no manual folder entry anywhere in this flow: the HeadRush's
+ * USB drive is found by probing the OS's normal removable-media mount
+ * locations for a folder literally named "NAM" (nam_library_find_drives) --
+ * the user only ever picks among *detected* drives, on the rare occasion
+ * more than one turns up. */
+typedef enum
+{
+  LIB_STEP_NO_DRIVE,   /* nam_library_find_drives found 0 candidates */
+  LIB_STEP_PICK_DRIVE, /* found 2+ candidates -- ambiguous, let the user pick which */
+  LIB_STEP_PREVIEW,
+  LIB_STEP_RESULT,
+  LIB_STEP_ERROR
+} LibraryStep;
+
+typedef struct
+{
+  LibraryStep step;
+  NamLibraryDriveCandidate candidates[NAM_LIBRARY_MAX_DRIVE_CANDIDATES];
+  int candidate_count;
+  NamLibraryDriveCandidate chosen; /* the candidate actually in use, once one is auto-selected or picked */
+  bool created_nam_dir;            /* true if `chosen`'s /NAM folder didn't exist and we just created it */
+  nk_bool generate_blocks;
+  nk_bool generate_v2_blocks; /* only meaningful if the "up to 4 instances" mod (Anxiety OD V2 hijack) was used */
+  nk_bool overwrite_blocks;
+  int tone;
+  int level;
+  NamLibraryPlan plan;
+  NamLibraryApplyResult result;
+  char error_msg[1024];
+} LibraryState;
+
+/* Commits to `candidate` (creating its /NAM folder first if
+ * nam_library_find_drives found the drive via its other default folders
+ * but no /NAM yet -- see NamLibraryDriveCandidate::nam_dir_exists) and
+ * scans it, moving `lib` to PREVIEW or ERROR accordingly. */
+static void library_select_candidate(LibraryState* lib, NamLibraryDriveCandidate candidate)
+{
+  lib->chosen = candidate;
+  lib->created_nam_dir = false;
+
+  char err[1024];
+  if (!candidate.nam_dir_exists)
+  {
+    if (!nam_library_ensure_dir(candidate.nam_dir, err, sizeof(err)))
+    {
+      snprintf(lib->error_msg, sizeof(lib->error_msg), "%s", err);
+      lib->step = LIB_STEP_ERROR;
+      return;
+    }
+    lib->created_nam_dir = true;
+  }
+
+  if (nam_library_scan(lib->chosen.nam_dir, &lib->plan, err, sizeof(err)))
+    lib->step = LIB_STEP_PREVIEW;
+  else
+  {
+    snprintf(lib->error_msg, sizeof(lib->error_msg), "%s", err);
+    lib->step = LIB_STEP_ERROR;
+  }
+}
+
+/* Re-probes for the HeadRush drive and moves `lib` to whichever step that
+ * result implies: NO_DRIVE (0 found), straight to a completed scan at
+ * PREVIEW/ERROR (exactly 1 found -- the common case, fully automatic),
+ * or PICK_DRIVE (2+ found, e.g. two devices plugged in at once). */
+static void library_detect_drive(LibraryState* lib)
+{
+  lib->candidate_count = nam_library_find_drives(lib->candidates, NAM_LIBRARY_MAX_DRIVE_CANDIDATES);
+  if (lib->candidate_count == 0)
+  {
+    lib->step = LIB_STEP_NO_DRIVE;
+    return;
+  }
+  if (lib->candidate_count > 1)
+  {
+    lib->step = LIB_STEP_PICK_DRIVE;
+    return;
+  }
+
+  library_select_candidate(lib, lib->candidates[0]);
+}
 
 typedef struct
 {
@@ -511,6 +599,199 @@ static int worker_main(void* data)
   return 0;
 }
 
+static void render_library_screen(struct nk_context* ctx, AppShared* shared, LibraryState* lib)
+{
+  if (lib->step == LIB_STEP_NO_DRIVE)
+  {
+    nk_layout_row_dynamic(ctx, 24, 1);
+    nk_label(ctx, "Prepare NAM Library", NK_TEXT_LEFT);
+    nk_layout_row_dynamic(ctx, 20, 1);
+    nk_label(ctx, "No HeadRush drive was found.", NK_TEXT_LEFT);
+    nk_layout_row_dynamic(ctx, 18, 1);
+    nk_label(ctx, "Plug in the HeadRush via USB, in file-transfer mode, then rescan -- if it", NK_TEXT_LEFT);
+    nk_layout_row_dynamic(ctx, 18, 1);
+    nk_label(ctx, "doesn't have a /NAM folder yet, this will create one for you.", NK_TEXT_LEFT);
+
+    nk_layout_row_dynamic(ctx, 36, 2);
+    if (nk_button_label(ctx, "Rescan"))
+      library_detect_drive(lib);
+    if (nk_button_label(ctx, "Back"))
+    {
+      SDL_LockMutex(shared->mutex);
+      shared->state = APP_STATE_PICK;
+      SDL_UnlockMutex(shared->mutex);
+    }
+  }
+  else if (lib->step == LIB_STEP_PICK_DRIVE)
+  {
+    nk_layout_row_dynamic(ctx, 24, 1);
+    nk_label(ctx, "Multiple HeadRush-looking drives were found -- pick one:", NK_TEXT_LEFT);
+
+    nk_layout_row_dynamic(ctx, 32, 1);
+    for (int i = 0; i < lib->candidate_count; ++i)
+    {
+      if (nk_button_label(ctx, lib->candidates[i].nam_dir))
+        library_select_candidate(lib, lib->candidates[i]);
+    }
+
+    nk_layout_row_dynamic(ctx, 36, 2);
+    if (nk_button_label(ctx, "Rescan"))
+      library_detect_drive(lib);
+    if (nk_button_label(ctx, "Back"))
+    {
+      SDL_LockMutex(shared->mutex);
+      shared->state = APP_STATE_PICK;
+      SDL_UnlockMutex(shared->mutex);
+    }
+  }
+  else if (lib->step == LIB_STEP_PREVIEW)
+  {
+    nk_layout_row_dynamic(ctx, 20, 1);
+    nk_label(ctx, lib->chosen.nam_dir, NK_TEXT_LEFT);
+    if (lib->created_nam_dir)
+    {
+      nk_layout_row_dynamic(ctx, 18, 1);
+      nk_label(ctx, "(this drive had no /NAM folder yet -- created it)", NK_TEXT_LEFT);
+    }
+
+    nk_layout_row_dynamic(ctx, 24, 1);
+    char header[300];
+    if (lib->plan.duplicate_prefix_groups > 0)
+      snprintf(header, sizeof(header), "%d model(s) found, %d will be renamed (%d duplicate index group(s) in the "
+                                        "existing library)",
+               lib->plan.count, lib->plan.rename_count, lib->plan.duplicate_prefix_groups);
+    else
+      snprintf(header, sizeof(header), "%d model(s) found, %d will be renamed", lib->plan.count,
+               lib->plan.rename_count);
+    nk_label(ctx, header, NK_TEXT_LEFT);
+
+    nk_layout_row_dynamic(ctx, 28, 1);
+    nk_checkbox_label(ctx, "Generate Anxiety OD .block presets", &lib->generate_blocks);
+    if (lib->generate_blocks)
+    {
+      nk_layout_row_dynamic(ctx, 18, 1);
+      char blocks_note[NAM_LIBRARY_MAX_PATH + 64];
+      snprintf(blocks_note, sizeof(blocks_note), "%s/ANXIETY OD%s", lib->chosen.blocks_dir,
+                lib->chosen.blocks_dir_exists ? "" : "  (Blocks folder doesn't exist yet -- will be created)");
+      nk_label(ctx, blocks_note, NK_TEXT_LEFT);
+
+      nk_layout_row_dynamic(ctx, 28, 1);
+      nk_checkbox_label(ctx, "Also generate Anxiety OD V2 blocks (only if you used the \"up to 4 instances\" mod)",
+                          &lib->generate_v2_blocks);
+
+      nk_layout_row_dynamic(ctx, 28, 1);
+      nk_checkbox_label(ctx, "Overwrite existing .block files", &lib->overwrite_blocks);
+      nk_layout_row_dynamic(ctx, 28, 2);
+      nk_property_int(ctx, "Tone", 0, &lib->tone, 100, 1, 1);
+      nk_property_int(ctx, "Level", 0, &lib->level, 100, 1, 1);
+    }
+
+    if (lib->plan.count == 0)
+    {
+      nk_layout_row_dynamic(ctx, 24, 1);
+      nk_label(ctx, "No .nam files found in that folder.", NK_TEXT_LEFT);
+    }
+    else
+    {
+      nk_layout_row_dynamic(ctx, 18, 1);
+      nk_label(ctx, "Use ^/v to reorder models before applying -- indexes are renumbered automatically.",
+                NK_TEXT_LEFT);
+      nk_layout_row_dynamic(ctx, 220, 1);
+      if (nk_group_begin(ctx, "lib_preview", NK_WINDOW_BORDER))
+      {
+        for (int i = 0; i < lib->plan.count; ++i)
+        {
+          NamLibraryItem* item = &lib->plan.items[i];
+          nk_layout_row_template_begin(ctx, 22);
+          nk_layout_row_template_push_variable(ctx, 120);
+          nk_layout_row_template_push_static(ctx, 28);
+          nk_layout_row_template_push_static(ctx, 28);
+          nk_layout_row_template_end(ctx);
+
+          char row[600];
+          if (item->needs_rename)
+            snprintf(row, sizeof(row), "%s  ->  %s", item->old_filename, item->new_filename);
+          else
+            snprintf(row, sizeof(row), "%s", item->old_filename);
+          nk_label(ctx, row, NK_TEXT_LEFT);
+
+          if (nk_button_label(ctx, "^") && i > 0)
+            nam_library_swap_items(&lib->plan, i, i - 1);
+          if (nk_button_label(ctx, "v") && i < lib->plan.count - 1)
+            nam_library_swap_items(&lib->plan, i, i + 1);
+        }
+        nk_group_end(ctx);
+      }
+    }
+
+    nk_layout_row_dynamic(ctx, 36, 2);
+    if (lib->plan.count > 0 && nk_button_label(ctx, "Apply"))
+    {
+      NamLibraryApplyResult result;
+      char err[1024];
+      if (nam_library_apply(lib->chosen.nam_dir, lib->generate_blocks ? lib->chosen.blocks_dir : NULL, &lib->plan,
+                             lib->generate_blocks, lib->generate_blocks && lib->generate_v2_blocks,
+                             lib->overwrite_blocks, lib->tone, lib->level, &result, err, sizeof(err)))
+      {
+        lib->result = result;
+        lib->step = LIB_STEP_RESULT;
+      }
+      else
+      {
+        snprintf(lib->error_msg, sizeof(lib->error_msg), "%s", err);
+        lib->step = LIB_STEP_ERROR;
+      }
+    }
+    if (nk_button_label(ctx, "Rescan"))
+      library_detect_drive(lib);
+  }
+  else if (lib->step == LIB_STEP_RESULT)
+  {
+    char msg[300];
+    nk_layout_row_dynamic(ctx, 24, 1);
+    nk_label(ctx, "NAM library prepared.", NK_TEXT_LEFT);
+    nk_layout_row_dynamic(ctx, 20, 1);
+    snprintf(msg, sizeof(msg), "%d file(s) renamed", lib->result.renamed_count);
+    nk_label(ctx, msg, NK_TEXT_LEFT);
+    if (lib->generate_blocks)
+    {
+      nk_layout_row_dynamic(ctx, 20, 1);
+      snprintf(msg, sizeof(msg), "%d ANXIETY OD .block file(s) written, %d already existed (skipped)",
+               lib->result.blocks_written_count, lib->result.blocks_skipped_existing_count);
+      nk_label(ctx, msg, NK_TEXT_LEFT);
+      if (lib->generate_v2_blocks)
+      {
+        nk_layout_row_dynamic(ctx, 20, 1);
+        snprintf(msg, sizeof(msg), "%d ANXIETY OD V2 .block file(s) written, %d already existed (skipped)",
+                 lib->result.v2_blocks_written_count, lib->result.v2_blocks_skipped_existing_count);
+        nk_label(ctx, msg, NK_TEXT_LEFT);
+      }
+    }
+    nk_layout_row_dynamic(ctx, 20, 1);
+    nk_label(ctx, "Reboot the device to reload the NAM library.", NK_TEXT_LEFT);
+
+    nk_layout_row_dynamic(ctx, 36, 2);
+    if (nk_button_label(ctx, "Rescan"))
+      library_detect_drive(lib);
+    if (nk_button_label(ctx, "Back to Install"))
+    {
+      SDL_LockMutex(shared->mutex);
+      shared->state = APP_STATE_PICK;
+      SDL_UnlockMutex(shared->mutex);
+    }
+  }
+  else /* LIB_STEP_ERROR */
+  {
+    nk_layout_row_dynamic(ctx, 24, 1);
+    nk_label_colored(ctx, "Something went wrong:", NK_TEXT_LEFT, nk_rgb(220, 60, 60));
+    nk_layout_row_dynamic(ctx, 80, 1);
+    nk_label_wrap(ctx, lib->error_msg);
+    nk_layout_row_dynamic(ctx, 36, 1);
+    if (nk_button_label(ctx, "Rescan"))
+      library_detect_drive(lib);
+  }
+}
+
 int main(int argc, char** argv)
 {
   (void)argc;
@@ -540,6 +821,11 @@ int main(int argc, char** argv)
   shared.mutex = SDL_CreateMutex();
   shared.state = APP_STATE_PICK;
   shared.selected_model = 0;
+
+  LibraryState lib;
+  memset(&lib, 0, sizeof(lib));
+  lib.tone = 50;
+  lib.level = 50;
 
   SDL_Thread* worker_thread = NULL;
   bool running = true;
@@ -601,6 +887,20 @@ int main(int argc, char** argv)
           SDL_UnlockMutex(shared.mutex);
           worker_thread = SDL_CreateThread(worker_main, "nam-worker", &shared);
         }
+
+        nk_layout_row_dynamic(ctx, 30, 1);
+        if (nk_button_label(ctx, "Prepare NAM Library..."))
+        {
+          lib.error_msg[0] = '\0';
+          library_detect_drive(&lib);
+          SDL_LockMutex(shared.mutex);
+          shared.state = APP_STATE_LIBRARY;
+          SDL_UnlockMutex(shared.mutex);
+        }
+      }
+      else if (state == APP_STATE_LIBRARY)
+      {
+        render_library_screen(ctx, &shared, &lib);
       }
       else if (state == APP_STATE_RUNNING)
       {

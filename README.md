@@ -60,6 +60,24 @@ position drifting every time you add or remove one.
 Reboot device after adding/changing files via USB — new models don't show up
 till restart.
 
+Keeping that numbering correct by hand gets tedious with a large library, and
+a stale/gapped prefix is actively misleading (see above: the number is only a
+mnemonic, the real position is always the file's alphabetical rank). The
+GUI's **Prepare NAM Library** screen automates this: it finds the device's
+`/NAM` folder itself (probing mounted-drive locations for the current OS —
+no path to type in, and creating `/NAM` itself if the drive doesn't have one
+yet), renumbers everything contiguously (closing any gaps, keeping
+already-correct files untouched), and can optionally generate one Anxiety OD
+`.block` preset per model — set into that model's `Drive` knob position —
+into `Blocks/ANXIETY OD` (created too, if missing) for direct browsing from
+the HeadRush's own block/preset picker instead of remembering percentages.
+If you installed the **up to 4 instances** mod option, a second checkbox
+generates the same set again as `Blocks/ANXIETY OD V2` blocks, for Anxiety OD
+V2's hijacked slot. Nothing is renamed or written until you review the
+preview and click Apply. A CLI (`nam-library-cli`) is also available for
+scripting the same operation (`--find-drives` to list detected drives,
+`--v2-blocks` to include the V2 set, or point it at an explicit folder).
+
 ## The pedal
 
 On the device, add the **Anxiety OD** pedal.
