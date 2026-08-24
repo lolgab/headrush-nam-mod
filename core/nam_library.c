@@ -375,7 +375,16 @@ bool nam_library_scan(const char* dir, NamLibraryPlan* out_plan, char* err, size
 bool nam_library_make_block_json(int drive, int tone, int level, bool v2, char* out_json, size_t out_json_size,
                                   char* uuid_out)
 {
-  uuid_t uuid;
+  /* A raw 16-byte buffer, deliberately not declared as `uuid_t`: on the
+   * Windows build, <windows.h> (included below for GetLogicalDrives/
+   * CreateDirectoryA) drags in the Windows SDK's own `uuid_t`/`UUID`
+   * (aka GUID, a struct) after e2fsprogs' <uuid/uuid.h> already fixed
+   * uuid_generate_random()/uuid_unparse_lower()'s real parameter type as
+   * plain `unsigned char *` -- a variable declared `uuid_t` at this point
+   * in the file would pick up the wrong (GUID) type and fail to compile
+   * (confirmed by CI). An explicit byte array always decays to the
+   * `unsigned char *` both functions actually expect, on every platform. */
+  unsigned char uuid[16];
   char uuid_str[37];
   uuid_generate_random(uuid);
   uuid_unparse_lower(uuid, uuid_str);
