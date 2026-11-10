@@ -40,11 +40,32 @@ typedef struct
   const unsigned char* data;
   const unsigned long* len;
   uint32_t mode;
+  bool text; /* must have Unix line endings (scripts, units) */
 } PayloadFile;
+
+/* A CR in an embedded text payload means the source was checked out with
+ * CRLF line endings (git core.autocrlf on Windows). Installed as-is, scripts
+ * would fail with "/bin/sh^M: not found", so refuse instead. .gitattributes
+ * prevents this; this check keeps it from failing silently on the device. */
+static bool check_unix_text(const char* what, const unsigned char* data, size_t len, char* err, size_t err_size)
+{
+  if (memchr(data, '\r', len) != NULL)
+  {
+    set_err(err, err_size,
+            "embedded %s has Windows (CRLF) line endings -- the installer was built from a checkout that "
+            "converted line endings; rebuild from a checkout that keeps mods/ byte-exact (see .gitattributes)",
+            what);
+    return false;
+  }
+  return true;
+}
 
 static bool write_payloads(Ext4Image* img, const PayloadFile* files, int count, NamProgressFn progress,
                            void* user_data, char* err, size_t err_size)
 {
+  for (int i = 0; i < count; ++i)
+    if (files[i].text && !check_unix_text(files[i].dest, files[i].data, (size_t)*files[i].len, err, err_size))
+      return false;
   for (int i = 0; i < count; ++i)
   {
     if (!nam_ext4_inject(img, files[i].dest, files[i].data, (size_t)*files[i].len, files[i].mode, err, err_size))
@@ -176,11 +197,11 @@ bool nam_mod_apply_usb_console(Ext4Image* img, const char* model_name, NamProgre
   }
 
   const PayloadFile files[] = {
-    {SCRIPTS_DIR "/setup-usb-console.sh", g_mod_setup_usb_console_sh, &g_mod_setup_usb_console_sh_len, 0755},
-    {SCRIPTS_DIR "/remove-usb-console.sh", g_mod_remove_usb_console_sh, &g_mod_remove_usb_console_sh_len, 0755},
-    {UNITS_DIR "/usb-console.service", g_mod_usb_console_service, &g_mod_usb_console_service_len, 0644},
+    {SCRIPTS_DIR "/setup-usb-console.sh", g_mod_setup_usb_console_sh, &g_mod_setup_usb_console_sh_len, 0755, true},
+    {SCRIPTS_DIR "/remove-usb-console.sh", g_mod_remove_usb_console_sh, &g_mod_remove_usb_console_sh_len, 0755, true},
+    {UNITS_DIR "/usb-console.service", g_mod_usb_console_service, &g_mod_usb_console_service_len, 0644, true},
     {UNITS_DIR "/usb-console-shell.service", g_mod_usb_console_shell_service, &g_mod_usb_console_shell_service_len,
-     0644},
+     0644, true},
   };
   if (!write_payloads(img, files, (int)(sizeof(files) / sizeof(files[0])), progress, user_data, err, err_size))
     return false;
@@ -222,8 +243,8 @@ bool nam_mod_apply_remote_screen(Ext4Image* img, const char* model_name, NamProg
   }
 
   const PayloadFile files[] = {
-    {"/usr/Evil/mx5_screen_server", g_mod_mx5_screen_server, &g_mod_mx5_screen_server_len, 0755},
-    {UNITS_DIR "/mx5-screen.service", g_mod_mx5_screen_service, &g_mod_mx5_screen_service_len, 0644},
+    {"/usr/Evil/mx5_screen_server", g_mod_mx5_screen_server, &g_mod_mx5_screen_server_len, 0755, false},
+    {UNITS_DIR "/mx5-screen.service", g_mod_mx5_screen_service, &g_mod_mx5_screen_service_len, 0644, true},
   };
   if (!write_payloads(img, files, (int)(sizeof(files) / sizeof(files[0])), progress, user_data, err, err_size))
     return false;
@@ -267,6 +288,8 @@ bool nam_mod_apply_tuner_tempo(uint8_t* evil_data, size_t evil_len, const char* 
     return false;
   }
 
+  if (!check_unix_text("Tuner.qml", t->payload, (size_t)*t->payload_len, err, err_size))
+    return false;
   if ((size_t)*t->payload_len != t->src_len)
   {
     set_err(err, err_size, "embedded Tuner.qml for %s is %lu bytes, must be exactly %u (same-length edit)", t->model,
