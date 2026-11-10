@@ -75,7 +75,10 @@
  *     CC 3      -> JogOutput  -> /Engine/PushEncoderCtrl/Encoder     (turn)
  *     Note 4    -> PressAndHold -> /Engine/PushEncoderCtrl/EncoderEnter (push)
  * We locate the port by NAME rather than hardcoding 129, since client numbers
- * are assigned dynamically.
+ * are assigned dynamically. The lookup is retried (at most once a second, on
+ * the next encoder event) until it succeeds, and redone if a send fails: at
+ * boot systemd can start us before Evil has created its port, and if Evil
+ * restarts, the port comes back under a new client number.
  *
  * libasound is dlopen()ed, so the server still builds and runs (without encoder
  * support) if it is missing.
@@ -399,6 +402,7 @@ static long now_ms(void)
 static int g_touch_down = 0;
 static int g_encoder_down = 0;
 static void encoder_press(int down);
+static int encoder_connect(void);
 
 static void touch(int down, int x, int y)
 {
@@ -459,7 +463,8 @@ static void on_signal(int sig)
 static void *g_alsa;
 static void *g_seq;                 /* snd_seq_t*  */
 static int g_seq_port = -1;         /* our source port */
-static int g_dst_client = -1, g_dst_port = -1;
+static int g_dst_client = -1, g_dst_port = -1;  /* Evil's port; -1 = not found yet */
+static struct timespec g_last_lookup;            /* rate limit for find_evil_port() */
 
 static int (*p_open)(void **, const char *, int, int);
 static int (*p_set_name)(void *, const char *);
@@ -509,8 +514,9 @@ static void *dl(const char *sym) { return dlsym(g_alsa, sym); }
  * assigned dynamically, so hardcoding 129 would be fragile). */
 static int find_evil_port(const char *want)
 {
-    void *cinfo = NULL, *pinfo = NULL;
-    if (p_client_info_malloc(&cinfo) < 0 || p_port_info_malloc(&pinfo) < 0) return -1;
+    static void *cinfo, *pinfo;   /* reused across retries */
+    if (!cinfo && p_client_info_malloc(&cinfo) < 0) return -1;
+    if (!pinfo && p_port_info_malloc(&pinfo) < 0) return -1;
     p_client_info_set_client(cinfo, -1);
     while (p_query_next_client(g_seq, cinfo) >= 0) {
         int c = p_client_info_get_client(cinfo);
@@ -560,26 +566,55 @@ static void encoder_open(void)
                     SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
                     SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
     if (g_seq_port < 0) { fprintf(stderr, "encoder: create_simple_port failed -- disabled\n"); g_seq = NULL; return; }
+    fprintf(stderr, "encoder: sequencer open\n");
+    encoder_connect();   /* try now; if Evil isn't up yet, retried on the next encoder event */
+}
+
+/* Make sure we know Evil's port, looking it up if not (rate-limited: a
+ * query walks every sequencer client). Returns 0 when connected. */
+static int encoder_connect(void)
+{
+    if (g_dst_client >= 0) return 0;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (g_last_lookup.tv_sec && now.tv_sec - g_last_lookup.tv_sec < 1) return -1;
+    g_last_lookup = now;
     if (find_evil_port("Midi::In::HG04 Control Surface MIDI 1") < 0) {
-        fprintf(stderr, "encoder: Evil's control-surface input port not found -- disabled\n");
-        g_seq = NULL; return;
+        fprintf(stderr, "encoder: Evil's control-surface input port not found yet\n");
+        return -1;
     }
-    if (p_connect_to(g_seq, g_seq_port, g_dst_client, g_dst_port) < 0)
+    /* Events are sent addressed to the port anyway, so a failed subscription
+     * is harmless. */
+    if (p_connect_to && p_connect_to(g_seq, g_seq_port, g_dst_client, g_dst_port) < 0)
         fprintf(stderr, "encoder: connect_to %d:%d failed (will send addressed instead)\n",
                 g_dst_client, g_dst_port);
     fprintf(stderr, "encoder: ready\n");
+    return 0;
 }
 
-static void seq_send(struct seq_event *e)
+static int seq_send_once(struct seq_event *e)
 {
-    if (!g_seq) return;
     e->queue = SND_SEQ_QUEUE_DIRECT;
     e->flags = SND_SEQ_TIME_STAMP_REAL | SND_SEQ_TIME_MODE_REL;
     e->source.client = 0; e->source.port = (unsigned char)g_seq_port;
     e->dest.client = (unsigned char)g_dst_client;
     e->dest.port = (unsigned char)g_dst_port;
-    p_event_output_direct(g_seq, e);
-    if (p_drain_output) p_drain_output(g_seq);
+    int r = p_event_output_direct(g_seq, e);
+    if (r >= 0 && p_drain_output) p_drain_output(g_seq);
+    return r;
+}
+
+static void seq_send(struct seq_event *e)
+{
+    if (!g_seq || encoder_connect() < 0) return;
+    if (seq_send_once(e) >= 0) return;
+    /* Evil's port is gone (Evil restarted?): forget it and look it up again
+     * right away, then retry this event once. */
+    fprintf(stderr, "encoder: send to %d:%d failed -- looking the port up again\n",
+            g_dst_client, g_dst_port);
+    g_dst_client = g_dst_port = -1;
+    g_last_lookup.tv_sec = 0;
+    if (encoder_connect() == 0) seq_send_once(e);
 }
 
 /* Encoder turn. The stock assignment feeds CC 3 into a JogOutput, which expects
