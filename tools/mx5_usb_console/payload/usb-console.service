@@ -1,0 +1,17 @@
+[Unit]
+Description=USB serial debug console gadget (ACM)
+After=sys-kernel-config.mount
+Wants=sys-kernel-config.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/Evil/Scripts/setup-usb-console.sh
+ExecStop=/usr/Evil/Scripts/remove-usb-console.sh
+# Never let gadget teardown stall a poweroff. Units that hold the gadget's ttys
+# (the shell, the screen server) order themselves After= this one, so systemd
+# stops them first -- but bound this anyway.
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

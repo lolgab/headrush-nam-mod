@@ -1,0 +1,27 @@
+[Unit]
+Description=MX5 remote screen server (framebuffer over USB serial)
+# The gadget must exist before we can open /dev/ttyGS1. Declaring this also
+# makes systemd stop US FIRST on shutdown, before the gadget is torn down --
+# tearing down a USB gadget while a process still holds its tty open can hang
+# the shutdown.
+After=usb-console.service
+Requires=usb-console.service
+
+[Service]
+# `<> /dev/ttyGS1 >&0` opens the port read-write as both stdin and stdout, so
+# frames go out and touch events come back over the same channel.
+# taskset -c 3: CPU0 carries the I2S audio IRQ and ~20 Evil threads, CPU2 the
+# DSP pool; CPU3 is the quiet one. (The RK3288 is quad-core.)
+ExecStart=/bin/sh -c 'exec taskset -c 3 /usr/Evil/mx5_screen_server -r 15 <> /dev/ttyGS1 >&0'
+Restart=always
+RestartSec=5
+# Idle cost is negligible: with no viewer connected the server holds no
+# flow-control credit, so it never reads the framebuffer or writes anything --
+# it just wakes briefly to check for a client.
+Nice=10
+# Never let this delay a shutdown.
+TimeoutStopSec=5
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

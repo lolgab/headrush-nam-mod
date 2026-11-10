@@ -1,0 +1,25 @@
+[Unit]
+Description=Root shell on the USB serial console
+After=usb-console.service
+Wants=usb-console.service
+
+[Service]
+ExecStart=/bin/sh
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyGS0
+TTYReset=yes
+TTYVHangup=yes
+Restart=always
+RestartSec=2
+# KillMode=control-group (the default), NOT process. With KillMode=process only
+# /bin/sh was signalled, so anything backgrounded from the shell survived the
+# service stopping -- and a leftover process still holding /dev/ttyGS1 open
+# while usb-console.service tore the gadget down could hang shutdown.
+KillMode=control-group
+# Bound the stop: a wedged shell must never block poweroff.
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

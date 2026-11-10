@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<!--
+  mx5_viewer.html -- browser viewer for mx5_screen_server, using Web Serial.
+
+  Same job as mx5_viewer.py, with no Python/pygame/pyserial to install: open this
+  file in Chrome or Edge, click Connect, pick the MX5's data port.
+
+  REQUIREMENTS
+    * Chromium-based browser (Chrome, Edge, Opera). Web Serial is not
+      implemented in Firefox or Safari.
+    * A secure context. Opening this file directly (file://) works in Chrome;
+      if navigator.serial is missing, serve the directory over localhost
+      instead (any static file server will do).
+    * Pick the SECOND MX5 serial port (the data channel, ttyGS1). The first is
+      the root shell.
+
+  PROTOCOL: see mx5_screen_server.c. Frames are self-describing (magic header),
+  tiles are RLE or raw, and the viewer acks each frame for flow control.
+-->
+<meta charset="utf-8">
+<title>HeadRush MX5 remote screen</title>
+<style>
+  body { background:#1b1b1d; color:#ddd; font:14px/1.4 system-ui, sans-serif;
+         margin:0; padding:16px; box-sizing:border-box; min-height:100vh;
+         display:flex; flex-direction:column; align-items:center;
+         justify-content:center; gap:12px; }
+  #bar { display:flex; gap:12px; align-items:center; }
+  button { font:inherit; padding:6px 14px; border-radius:6px; border:1px solid #555;
+           background:#2d2d30; color:#eee; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  #screen { border:1px solid #444; image-rendering:pixelated; cursor:crosshair;
+            display:block; }
+  #stat { color:#8a8; font-variant-numeric:tabular-nums; }
+  #err { color:#e77; }
+  #hint { color:#777; font-size:12px; }
+</style>
+
+<div id="bar">
+  <button id="connect">Connect…</button>
+  <span id="stat">not connected</span>
+  <span id="err"></span>
+</div>
+<div id="hint">click/drag = touch &middot; wheel or up/down arrows = encoder &middot; wheel-click or enter = press it &middot; left/right arrows and typing go to the device</div>
+<canvas id="screen" width="800" height="480"></canvas>
+
+<script>
+"use strict";
+
+// Must match mx5_screen_server.c
+const MAGIC = [0x4d, 0x58, 0x35, 0x53];   // "MX5S"
+const PROTO_VER = 3;
+const HDR_LEN = 24;
+const ENC_RAW = 0, ENC_RLE = 1;
+
+const screenEl = document.getElementById("screen");
+const ctx = screenEl.getContext("2d");
+const statEl = document.getElementById("stat");
+const errEl = document.getElementById("err");
+const connectBtn = document.getElementById("connect");
+
+// Framebuffer-orientation backing store (portrait); the visible canvas is
+// landscape because the MX5's panel is mounted rotated.
+let off = null, offCtx = null;
+let fbW = 0, fbH = 0, tileSize = 0;
+let port = null, writer = null, reader = null;
+let running = null, switching = false;
+
+function setStatus(s) { statEl.textContent = s; }
+
+// The button stays live once connected -- an OS can hand the device a different
+// port on a later boot, and a user can pick the wrong one -- so switching has to
+// remain possible rather than being a one-shot at startup.
+function setConnected(on) {
+  connectBtn.textContent = on ? "Change port…" : "Connect";
+}
+function setError(s) { errEl.textContent = s; }
+
+/* ---------------- stream buffer ---------------- */
+// Web Serial hands us whatever bytes have arrived -- unlike pyserial there is no
+// "block until N bytes" call to misuse, so we just accumulate and parse what we
+// can. We still need our own buffering because frames span reads.
+let buf = new Uint8Array(0);
+let lastFrameMs = 0;
+let watchdog = null;
+// Set whenever the status line stops reflecting a live connection: on connect,
+// on reconnect, and after a stall. Cleared by the next frame that draws.
+// ensureCanvas() can't own this -- it early-returns when the geometry is
+// unchanged, so reconnecting to the same device would never update the status.
+let needStatus = false;
+
+function append(chunk) {
+  const next = new Uint8Array(buf.length + chunk.length);
+  next.set(buf, 0);
+  next.set(chunk, buf.length);
+  buf = next;
+}
+
+// Scan a standalone array (the probe must not disturb the global `buf`).
+function hasMagic(a) {
+  for (let i = 0; i + 4 <= a.length; i++) {
+    if (a[i] === MAGIC[0] && a[i+1] === MAGIC[1] &&
+        a[i+2] === MAGIC[2] && a[i+3] === MAGIC[3]) return true;
+  }
+  return false;
+}
+
+function findMagic(from) {
+  for (let i = from; i + 4 <= buf.length; i++) {
+    if (buf[i] === MAGIC[0] && buf[i+1] === MAGIC[1] &&
+        buf[i+2] === MAGIC[2] && buf[i+3] === MAGIC[3]) return i;
+  }
+  return -1;
+}
+
+/* Try to parse one complete frame out of `buf`.
+   Returns "need-more" if the frame is incomplete (wait for more bytes),
+   "none" if there's no header yet, or an object describing the frame. */
+function tryParseFrame() {
+  let search = 0;
+  for (;;) {
+    const i = findMagic(search);
+    if (i < 0) {
+      // Drop everything except a possible partial magic at the tail.
+      if (buf.length > 3) buf = buf.slice(buf.length - 3);
+      return "none";
+    }
+    if (buf.length - i < HDR_LEN) {
+      if (i > 0) buf = buf.slice(i);
+      return "need-more";
+    }
+    const dv = new DataView(buf.buffer, buf.byteOffset + i, HDR_LEN);
+    const ver = dv.getUint16(4, true);
+    const tile = dv.getUint16(6, true);
+    const w = dv.getUint32(8, true);
+    const h = dv.getUint32(12, true);
+    const bpp = dv.getUint32(16, true);
+    const ntiles = dv.getUint32(20, true);
+    const txCount = Math.ceil(w / tile), tyCount = Math.ceil(h / tile);
+    const sane = ver === PROTO_VER && [8,16,32,64].includes(tile) && bpp === 32 &&
+                 w > 0 && w <= 4096 && h > 0 && h <= 4096 &&
+                 ntiles <= txCount * tyCount;
+    if (!sane) {
+      // Pixel data can contain the magic bytes. Advance ONE byte and keep
+      // hunting, rather than skipping the header length (which could swallow a
+      // real header starting inside the false one).
+      search = i + 1;
+      continue;
+    }
+
+    // Walk the tile records to see whether the whole frame has arrived.
+    let p = i + HDR_LEN;
+    const tiles = [];
+    for (let t = 0; t < ntiles; t++) {
+      if (p + 9 > buf.length) { if (i > 0) buf = buf.slice(i); return "need-more"; }
+      const tdv = new DataView(buf.buffer, buf.byteOffset + p, 9);
+      const tx = tdv.getUint16(0, true);
+      const ty = tdv.getUint16(2, true);
+      const enc = tdv.getUint8(4);
+      const len = tdv.getUint32(5, true);
+      const tileBytes = tile * tile * 4;
+      if (len > tileBytes || (enc === ENC_RAW && len !== tileBytes)) {
+        search = i + 1; break;                     // malformed -> false header
+      }
+      if (p + 9 + len > buf.length) { if (i > 0) buf = buf.slice(i); return "need-more"; }
+      tiles.push({ tx, ty, enc, off: p + 9, len });
+      p += 9 + len;
+      if (t === ntiles - 1) {
+        // Keep a reference to the array these offsets index into: `buf` is
+        // about to be replaced by slice(), and a stale alias would decode
+        // garbage.
+        const frame = { tile, w, h, tiles, src: buf };
+        buf = buf.slice(p);
+        return frame;
+      }
+    }
+    if (ntiles === 0) { const src = buf; buf = buf.slice(p); return { tile, w, h, tiles: [], src }; }
+    if (search <= i) return "need-more";
+  }
+}
+
+/* ---------------- rendering ---------------- */
+
+function ensureCanvas(w, h, tile) {
+  if (fbW === w && fbH === h && tileSize === tile) return;
+  fbW = w; fbH = h; tileSize = tile;
+  off = new OffscreenCanvas(w, h);
+  offCtx = off.getContext("2d");
+  screenEl.width = h;            // landscape: rotated
+  screenEl.height = w;
+  needStatus = true;
+}
+
+function statusConnected() { return `connected: ${fbW}x${fbH}`; }
+
+function drawFrame(frame) {
+  ensureCanvas(frame.w, frame.h, frame.tile);
+  const tile = frame.tile;
+  const src = frame.src;
+  const img = offCtx.createImageData(tile, tile);
+  const px = img.data;
+
+  for (const t of frame.tiles) {
+    // The framebuffer is BGRX: byte 3 is padding (0x00 on this device), NOT
+    // alpha. Swizzle to RGBA and force alpha opaque -- treating the pad byte as
+    // alpha renders a fully transparent (black) image from perfect data.
+    if (t.enc === ENC_RLE) {
+      let o = 0;
+      for (let s = t.off; s < t.off + t.len; s += 6) {
+        const count = src[s] | (src[s+1] << 8);
+        const b = src[s+2], g = src[s+3], r = src[s+4];
+        for (let n = 0; n < count; n++) {
+          px[o++] = r; px[o++] = g; px[o++] = b; px[o++] = 255;
+        }
+      }
+    } else {
+      let o = 0;
+      for (let s = t.off; s < t.off + t.len; s += 4) {
+        px[o++] = src[s+2]; px[o++] = src[s+1]; px[o++] = src[s]; px[o++] = 255;
+      }
+    }
+    offCtx.putImageData(img, t.tx * tile, t.ty * tile);
+  }
+
+  // Rotate portrait framebuffer -> landscape display.
+  // Maps fb (x,y) -> display (y, fbW-1-x), i.e. the same mapping the click
+  // handler inverts below.
+  ctx.setTransform(0, -1, 1, 0, 0, fbW);
+  ctx.drawImage(off, 0, 0);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+/* ---------------- input ---------------- */
+
+let dragging = false;
+let lastX = -1, lastY = -1;
+
+function sendTouch(down, ev) {
+  if (!writer || !fbW) return;
+  const r = screenEl.getBoundingClientRect();
+  const mx = Math.round((ev.clientX - r.left) * (screenEl.width / r.width));
+  const my = Math.round((ev.clientY - r.top) * (screenEl.height / r.height));
+  // Inverse of the display rotation above.
+  let x = fbW - 1 - my;
+  let y = mx;
+  x = Math.max(0, Math.min(fbW - 1, x));
+  y = Math.max(0, Math.min(fbH - 1, y));
+  // Drop no-op drag updates: mousemove fires far faster than the device needs,
+  // and flooding the link delays the touch-RELEASE, which turns a tap into a
+  // long press. Press and release are always sent.
+  if (down && x === lastX && y === lastY) return;
+  lastX = down ? x : -1;
+  lastY = down ? y : -1;
+  const b = new Uint8Array(6);
+  b[0] = 0x54;                       // 'T'
+  b[1] = down ? 1 : 0;
+  b[2] = x & 0xff; b[3] = (x >> 8) & 0xff;
+  b[4] = y & 0xff; b[5] = (y >> 8) & 0xff;
+  writer.write(b).catch(e => setError("touch: " + e.message));
+}
+
+/* Encoder emulation. The physical knob is the control surface sending MIDI, and
+   the server injects the same MIDI into Evil's ALSA sequencer port -- so these
+   behave exactly like turning/pressing the real knob.
+     arrows up/left  -> one click counter-clockwise
+     arrows down       -> one click clockwise
+     enter             -> press the knob (held while the key is held)
+     everything else   -> injected as a real key (see KEYCODE below) */
+function sendEncoder(delta) {
+  if (!writer) return;
+  writer.write(new Uint8Array([0x45, delta & 0xff])).catch(e => setError("encoder: " + e.message));
+}
+function sendEncoderPress(down) {
+  if (!writer) return;
+  writer.write(new Uint8Array([0x50, down ? 1 : 0])).catch(e => setError("encoder: " + e.message));
+}
+const keysDown = new Set();
+
+function sendKey(code, down) {
+  if (!writer) return;
+  if (down) keysDown.add(code); else keysDown.delete(code);
+  writer.write(new Uint8Array([0x42, code & 0xff, (code >> 8) & 0xff, down ? 1 : 0]))
+        .catch(e => setError("key: " + e.message));
+}
+
+/* Linux input codes, keyed by KeyboardEvent.code so the mapping is physical and
+ * layout-independent. The table lives here rather than on the device: the
+ * server just injects what it is told, so adding keys needs no reflash. */
+const KEYCODE = {
+  Escape:1, Digit1:2, Digit2:3, Digit3:4, Digit4:5, Digit5:6, Digit6:7,
+  Digit7:8, Digit8:9, Digit9:10, Digit0:11, Minus:12, Equal:13, Backspace:14,
+  Tab:15, KeyQ:16, KeyW:17, KeyE:18, KeyR:19, KeyT:20, KeyY:21, KeyU:22,
+  KeyI:23, KeyO:24, KeyP:25, BracketLeft:26, BracketRight:27, Enter:28,
+  ControlLeft:29, KeyA:30, KeyS:31, KeyD:32, KeyF:33, KeyG:34, KeyH:35,
+  KeyJ:36, KeyK:37, KeyL:38, Semicolon:39, Quote:40, Backquote:41,
+  ShiftLeft:42, Backslash:43, KeyZ:44, KeyX:45, KeyC:46, KeyV:47, KeyB:48,
+  KeyN:49, KeyM:50, Comma:51, Period:52, Slash:53, ShiftRight:54,
+  AltLeft:56, Space:57, CapsLock:58,
+  NumpadEnter:96, ControlRight:97, AltRight:100,
+  Home:102, PageUp:104, ArrowLeft:105, ArrowRight:106, End:107,
+  PageDown:109, Insert:110, Delete:111,
+};
+
+/* Arrow keys are split deliberately. Up/Down drive the encoder, because that is
+ * what the knob does nearly everywhere in the UI. Left/Right are sent as real
+ * arrow keys instead: in the naming dialogs they move the text cursor, and on
+ * every other screen the knob only selects Cancel/Save, which Up/Down already
+ * covers. Mapping them to knob turns would make text editing impossible for no
+ * gain elsewhere.
+ *
+ * Space types a space -- rig names contain them -- so Enter alone is the knob
+ * press. Enter is also what the naming dialog's onAccepted handler wants, so it
+ * confirms in both contexts. */
+const ENCODER_KEY = { ArrowUp: -1, ArrowDown: 1 };
+const KNOB_PRESS_KEY = "Enter";
+
+/* The knob is one physical control with two ways to press it -- Enter and the
+ * wheel button -- so track them separately and drive the device from whether
+ * EITHER is held. Sharing a single flag would make releasing one release the
+ * knob while the other was still down. */
+let knobDown = false, knobKeyDown = false, knobMouseDown = false;
+
+function updateKnob() {
+  const want = knobKeyDown || knobMouseDown;
+  if (want === knobDown) return;
+  knobDown = want;
+  sendEncoderPress(want);
+}
+
+window.addEventListener("keydown", e => {
+  if (!writer) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;   // leave browser shortcuts alone
+
+  const turn = ENCODER_KEY[e.key];
+  if (turn) { sendEncoder(turn); e.preventDefault(); return; }
+
+  if (e.key === KNOB_PRESS_KEY) {
+    knobKeyDown = true;
+    updateKnob();
+    e.preventDefault();
+    return;
+  }
+
+  const code = KEYCODE[e.code];
+  if (code) { sendKey(code, true); e.preventDefault(); }
+});
+
+window.addEventListener("keyup", e => {
+  if (!writer) return;
+  if (e.key === KNOB_PRESS_KEY) {
+    knobKeyDown = false;
+    updateKnob();
+    e.preventDefault();
+    return;
+  }
+  const code = KEYCODE[e.code];
+  if (code) { sendKey(code, false); e.preventDefault(); }
+});
+
+// A key held when focus leaves never delivers its keyup, so release what we
+// actually sent down -- and only that. Releasing the whole table instead
+// floods the device log with dozens of no-op events every time the window
+// loses focus, which buries the events worth reading.
+window.addEventListener("blur", () => {
+  if (!writer) return;
+  for (const c of [...keysDown]) sendKey(c, false);
+  knobKeyDown = knobMouseDown = false;
+  updateKnob();
+});
+
+/* Mouse wheel turns the encoder. Deltas are normalised to notches before being
+ * accumulated because the unit depends on deltaMode -- roughly 100 per notch in
+ * pixel mode, 3 in line mode, 1 in page mode -- and a precision trackpad emits a
+ * stream of small ones. Sending a step per event would spin the knob wildly on
+ * a trackpad and unevenly across browsers. */
+const WHEEL_UNIT = { 0: 100, 1: 3, 2: 1 };
+let wheelAccum = 0;
+
+screenEl.addEventListener("wheel", e => {
+  if (!writer) return;
+  e.preventDefault();                     // don't scroll the page with the mirror
+  wheelAccum += e.deltaY / (WHEEL_UNIT[e.deltaMode] || 100);
+  const steps = Math.trunc(wheelAccum);   // scroll down = clockwise, as with ArrowDown
+  if (!steps) return;
+  wheelAccum -= steps;
+  sendEncoder(Math.max(-8, Math.min(8, steps)));   // cap a flung trackpad
+}, { passive: false });                   // passive listeners can't preventDefault
+
+/* Button 0 is the touchscreen; button 1 (the wheel) presses the encoder, which
+ * is how the knob behaves on the hardware. Restricting touch to button 0 also
+ * fixes middle-click previously injecting a tap. */
+screenEl.addEventListener("mousedown", e => {
+  if (e.button === 1) {
+    knobMouseDown = true;
+    updateKnob();
+    e.preventDefault();      // suppress the browser's middle-click autoscroll
+    return;
+  }
+  if (e.button !== 0) return;
+  dragging = true;
+  sendTouch(true, e);
+});
+
+screenEl.addEventListener("mousemove", e => { if (dragging) sendTouch(true, e); });
+
+window.addEventListener("mouseup", e => {
+  if (e.button === 1) { knobMouseDown = false; updateKnob(); return; }
+  if (e.button !== 0) return;
+  if (dragging) { dragging = false; sendTouch(false, e); }
+});
+
+// Middle-click also raises auxclick, which can still trigger autoscroll on some
+// platforms even after mousedown was defaulted away.
+screenEl.addEventListener("auxclick", e => { if (e.button === 1) e.preventDefault(); });
+
+/* ---------------- connection ---------------- */
+
+async function run(p) {
+  port = p;
+  // bufferSize matters: the default is 255 bytes, which throttles the link
+  // badly. (The Python viewer hit the same class of problem with an undersized
+  // driver buffer: 12 MB/s collapsed to 0.6 MB/s.)
+  await port.open({ baudRate: 115200, bufferSize: 1024 * 1024 });
+  writer = port.writable.getWriter();
+  reader = port.readable.getReader();
+  buf = new Uint8Array(0);                      // no stale bytes from a prior port
+  needStatus = true;
+
+  await writer.write(new Uint8Array([0x4b]));   // 'K': send me a keyframe
+
+  // Watchdog. The ack below is only sent once a COMPLETE frame parses, and the
+  // server sends nothing without credit -- so if bytes are lost mid-frame the
+  // parser waits for a tail that will never come, the ack is never sent, and
+  // both ends wait on each other forever. Web Serial's read() has no timeout,
+  // so unlike the Python viewer (which recovers via pyserial's timeout) nothing
+  // here would ever break the deadlock: the screen freezes while input keeps
+  // working, because input travels the other direction entirely.
+  lastFrameMs = performance.now();
+  clearInterval(watchdog);
+  watchdog = setInterval(() => {
+    if (!writer || performance.now() - lastFrameMs < 2000) return;
+    buf = new Uint8Array(0);                       // drop the partial frame
+    lastFrameMs = performance.now();               // re-arm before retrying
+    needStatus = true;
+    writer.write(new Uint8Array([0x4b])).catch(() => {});   // resync + reset credit
+    setStatus("stalled — resyncing…");
+  }, 1000);
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value && value.length) append(value);
+
+      for (;;) {
+        const r = tryParseFrame();
+        if (r === "need-more" || r === "none") break;
+        drawFrame(r);
+        if (needStatus) { setStatus(statusConnected()); needStatus = false; }
+        lastFrameMs = performance.now();
+        // Ack: the server sends the next frame only once we've consumed this
+        // one. Without this pacing the device outruns us and latency grows
+        // without bound, because delta frames can't be dropped to catch up.
+        await writer.write(new Uint8Array([0x41]));   // 'A'
+      }
+    }
+  } catch (e) {
+    if (!switching) setError("read: " + e.message);
+  } finally {
+    clearInterval(watchdog);
+    watchdog = null;
+    // Release everything: the port must be fully closed before it -- or another
+    // port -- can be opened again.
+    try { reader.releaseLock(); } catch (e) {}
+    try { writer.releaseLock(); } catch (e) {}
+    reader = null; writer = null;
+    try { await port.close(); } catch (e) {}
+    port = null;
+    if (!switching) { setConnected(false); setStatus("disconnected"); }
+  }
+}
+
+/* Tear down the current link and wait for run() to finish unwinding. Switching
+ * ports requires this: a port can't be reopened while its reader/writer locks
+ * are held, and two live readers would fight over the same stream. */
+async function disconnect() {
+  if (!running) return;
+  switching = true;
+  try { if (reader) await reader.cancel(); } catch (e) {}
+  try { await running; } catch (e) {}
+  running = null;
+  switching = false;
+}
+
+/* Auto-reconnect.
+ *
+ * requestPort() needs a user gesture, but that is a ONE-TIME cost per origin:
+ * getPorts() returns everything already granted with no gesture and no dialog,
+ * and open() on an already-permitted port needs no gesture either. So a second
+ * visit can connect by itself.
+ *
+ * Which port, though? The MX5 exposes two ACM functions from a single composite
+ * gadget -- ttyGS0 (root shell) and ttyGS1 (this data channel) -- so they share
+ * a VID/PID, and getInfo() exposes nothing else to tell them apart. Port order
+ * is not guaranteed either. So probe instead: the protocol is self-describing,
+ * so ask for a keyframe and see whether an "MX5S" magic comes back.
+ *
+ * Probing the shell port is harmless but not invisible: the 'K' lands in the
+ * shell's input line. We send ^U afterwards to erase it, which the server's
+ * parser ignores as noise. Nothing is ever executed -- no newline is sent. */
+const PROBE_MS = 1500;
+
+async function looksLikeServer(p) {
+  let reader = null, w = null;
+  try {
+    await p.open({ baudRate: 115200, bufferSize: 1024 * 1024 });
+    w = p.writable.getWriter();
+    reader = p.readable.getReader();
+    await w.write(new Uint8Array([0x4b]));                 // 'K'
+    let seen = new Uint8Array(0), hit = false;
+    const deadline = performance.now() + PROBE_MS;
+    while (performance.now() < deadline) {
+      const t = setTimeout(() => reader.cancel().catch(() => {}),
+                           Math.max(0, deadline - performance.now()));
+      const { value, done } = await reader.read();
+      clearTimeout(t);
+      if (done) break;
+      if (value && value.length) {
+        const merged = new Uint8Array(seen.length + value.length);
+        merged.set(seen); merged.set(value, seen.length);
+        seen = merged.slice(-4096);
+        if (hasMagic(seen)) { hit = true; break; }
+      }
+    }
+    if (!hit) await w.write(new Uint8Array([0x15])).catch(() => {});  // ^U
+    return hit;
+  } catch (e) {
+    return false;
+  } finally {
+    try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch (e) {}
+    try { if (w) w.releaseLock(); } catch (e) {}
+    try { await p.close(); } catch (e) {}
+  }
+}
+
+let autoBusy = false;
+
+async function autoConnect() {
+  // The "connect" event can fire while a probe is already in flight, and two
+  // concurrent probes would fight over opening the same ports.
+  if (autoBusy || running || !("serial" in navigator)) return false;
+  autoBusy = true;
+  try {
+    return await autoConnectInner();
+  } finally {
+    autoBusy = false;
+  }
+}
+
+async function autoConnectInner() {
+  let ports = [];
+  try { ports = await navigator.serial.getPorts(); } catch (e) { return false; }
+  if (!ports.length) return false;
+  setStatus("looking for the MX5…");
+  for (const p of ports) {
+    if (!(await looksLikeServer(p))) continue;
+    setStatus("connecting…");
+    setConnected(true);
+    running = run(p);
+    try { await running; } catch (e) { setError(e.message); }
+    return true;
+  }
+  setStatus("not connected");
+  return false;
+}
+
+connectBtn.addEventListener("click", async () => {
+  setError("");
+  if (!("serial" in navigator)) {
+    setError("This browser has no Web Serial API — use Chrome or Edge " +
+             "(and a secure context: file:// or localhost).");
+    return;
+  }
+  // Show the picker BEFORE tearing anything down, so cancelling it leaves a
+  // working connection alone. requestPort() needs the user gesture, and we are
+  // still inside the click handler here.
+  let p;
+  try {
+    p = await navigator.serial.requestPort();
+  } catch (e) {
+    return;                                   // cancelled -- keep the current link
+  }
+
+  await disconnect();
+
+  // Validate the manual pick too. Auto-connect probes, but without this a user
+  // who chooses the shell port instead of the data port gets a viewer that sits
+  // there forever with no indication of what went wrong.
+  setStatus("checking port…");
+  if (!(await looksLikeServer(p))) {
+    setConnected(false);
+    setStatus("not connected");
+    setError("That port didn't answer. The MX5 exposes two: pick the second " +
+             "(data) one, not the shell. Also check that mx5_screen_server is " +
+             "running on the device.");
+    return;
+  }
+
+  setStatus("connecting…");
+  setConnected(true);
+  running = run(p);
+  try { await running; } catch (e) { setError(e.message); }
+});
+
+// Also fires when the MX5 is plugged in or finishes rebooting, so the viewer
+// picks the stream back up on its own instead of needing a reload.
+if ("serial" in navigator) {
+  navigator.serial.addEventListener("connect", () => {
+    if (!writer) autoConnect();
+  });
+  autoConnect();
+}
+</script>

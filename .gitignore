@@ -10,3 +10,7 @@ __pycache__/
 
 # fetched by scripts/fetch_nam_core.sh (tarball, not a git submodule)
 /nam_core/
+
+# mx5_remote_screen build outputs (regenerate with tools/mx5_remote_screen/build.sh)
+/tools/mx5_remote_screen/mx5_screen_server
+/tools/mx5_remote_screen/mx5_screen_server.deploy.sh
