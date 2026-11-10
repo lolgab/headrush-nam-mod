@@ -20,12 +20,19 @@ applies the mod, and writes a ready-to-run result -- no terminal needed:
 - `core/` -- the portable pipeline: `fit_image` (FDT/FIT read+write),
   `elf_patch` (Anxiety OD vtable hijack), `qml_patch` (knob relabel),
   `ext4_image` (libext2fs-backed dump/inject/verify), `xz_codec`
-  (liblzma-backed compress/decompress), `launcher_script`, `model_targets`.
+  (liblzma-backed compress/decompress), `launcher_script`, `model_targets`,
+  `mods` (the list of selectable mods and their supported models) and
+  `device_mods` (apply steps for the non-NAM mods).
+- `mods/` -- the non-NAM mods: payload files installed verbatim on the
+  device, the remote-screen server source and viewers, and each mod's
+  README. See `mods/README.md`.
 - `blobs/` -- `libnam_hook.so` / `libnam_preload.so` / `trampoline_gonk.bin`,
-  cross-compiled from `patch/*.cpp`. These never depend on user input --
+  cross-compiled from `patch/*.cpp`, plus `mx5_screen_server` from
+  `mods/remote_screen/`. These never depend on user input --
   only on `patch/*.cpp` -- so end users never need the ARM toolchain
   themselves. **Pure build artifacts, deliberately NOT committed to git**
-  (the repo's own root `.gitignore` already excludes `*.so`/`*.bin`): CMake
+  (the repo's own root `.gitignore` excludes `*.so`/`*.bin` and the
+  extensionless `blobs/mx5_screen_server`): CMake
   rebuilds them automatically via `scripts/build_blobs.sh` (Docker + the
   same ARM cross-toolchain in `docker/Dockerfile`) whenever `patch/*.cpp`/
   `nam_core` changes, and every build target depends on that rebuild --
@@ -98,12 +105,22 @@ the `blobs/` entry above.
 CLI (local dev/debugging tool only, not built or shipped by CI):
 
 ```sh
-build/gui-core-cli <stock Update.img> <out.img> --model pedalboard [--instances 2|4]
+build/gui-core-cli <stock Update.img> <out.img> --model pedalboard [--mods LIST] [--instances 2|4]
+build/gui-core-cli --list-mods
 ```
 
-`--instances 4` also hijacks Anxiety OD V2 for up to 4 NAM instances total
-(default: `2`, Anxiety OD v1 only) -- see docs/TECHNICAL.md's "Up to 4
-instances" section.
+`--mods` takes a comma-separated list of mod keys (`nam`, `nam-4x`,
+`usb-console`, `remote-screen`, `tuner-tempo`; `--list-mods` describes them
+and which models each supports). It defaults to `nam`, the original
+behavior. A mod's requirement must be listed too (e.g. `remote-screen` needs
+`usb-console`), and the CLI refuses mods that aren't verified for the chosen
+model. `--instances 4` is shorthand for adding `nam-4x`: it also hijacks
+Anxiety OD V2 for up to 4 NAM instances total -- see docs/TECHNICAL.md's "Up
+to 4 instances" section. For example:
+
+```sh
+build/gui-core-cli stock.img out.img --model mx5 --mods nam,usb-console,remote-screen
+```
 
 GUI -- can be run from anywhere, not just the repo root:
 
@@ -111,12 +128,14 @@ GUI -- can be run from anywhere, not just the repo root:
 build/headrush-nam-gui
 ```
 
-Both binaries are fully self-contained: `blobs/*` (compiled once by
+Both binaries are fully self-contained. `blobs/*` (compiled once by
 `scripts/build_blobs.sh`/`build_blobs_native.sh` via the ARM
-cross-toolchain) gets embedded directly into the executable as C byte
-arrays at build time (`tools/bin2c.c` generates the array sources, wired
-into `CMakeLists.txt`; see `core/patch_pipeline.c`, which references them
-via `core/nam_blobs_embedded.h` instead of reading files from disk). No
+cross-toolchain, including the remote-screen mod's `mx5_screen_server`) and
+the other mods' payload files under `mods/` are embedded directly into the
+executable as C byte arrays at build time (`tools/bin2c.c` generates the
+array sources, wired into `CMakeLists.txt`; `core/patch_pipeline.c` and
+`core/device_mods.c` reference them via `core/nam_blobs_embedded.h` and
+`core/mod_payloads_embedded.h` instead of reading files from disk). No
 external files, no directory layout to preserve -- a double-clicked or
 arbitrarily-relocated binary just works.
 

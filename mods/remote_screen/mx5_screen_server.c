@@ -85,7 +85,7 @@
  * (the DSP pool); CPU3 has one. So: taskset -c 3 ./mx5_screen_server
  *
  * Build (from repo root) with the Bootlin glibc-2.31 toolchain in .toolchain,
- * e.g. see tools/mx5_remote_screen/build.sh
+ * e.g. see mods/remote_screen/build.sh
  */
 #define _GNU_SOURCE
 #include <errno.h>

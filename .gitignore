@@ -11,6 +11,9 @@ __pycache__/
 # fetched by scripts/fetch_nam_core.sh (tarball, not a git submodule)
 /nam_core/
 
-# mx5_remote_screen build outputs (regenerate with tools/mx5_remote_screen/build.sh)
-/tools/mx5_remote_screen/mx5_screen_server
-/tools/mx5_remote_screen/mx5_screen_server.deploy.sh
+# extensionless blob (the rest of blobs/ is covered by *.so/*.bin above)
+/blobs/mx5_screen_server
+
+# remote-screen dev-loop outputs (regenerate with mods/remote_screen/build.sh)
+/mods/remote_screen/mx5_screen_server
+/mods/remote_screen/mx5_screen_server.deploy.sh

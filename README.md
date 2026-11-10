@@ -20,10 +20,11 @@ confirmed on real hardware — see below.
 
    Without these, `headrush-nam-gui` fails to launch with a
    `Library not loaded` error.
-2. Run it, pick your model (Pedalboard, MX5, or Gigboard), choose **2 instances**
-   or **up to 4 instances** (see "The pedal" below), and click **Install NAM
-   Mod** — it downloads the official HeadRush firmware updater and builds a
-   patched copy of it in the current directory.
+2. Run it, pick your model (Pedalboard, MX5, or Gigboard), tick the mods you
+   want (see "Optional mods" below — by default just the NAM mod is
+   selected, with up to 2 instances), and click **Install** — it downloads
+   the official HeadRush firmware updater and builds a patched copy of it in
+   the current directory.
 3. Put your device in firmware-update mode. See
    [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a
    walkthrough.
@@ -94,9 +95,27 @@ on every instance.
 **2 instances vs up to 4**: the stock firmware allows up to 2 Anxiety OD
 blocks on a board, so by default that's 2 NAM instances max, and Anxiety OD
 **V2** is left untouched, still available with its original sound. Pick
-**up to 4 instances** in the installer to also hijack Anxiety OD V2 (also
+**Also use Anxiety OD V2 for NAM** in the installer to also hijack Anxiety OD V2 (also
 addable up to twice) the same way, for up to 4 NAM instances total — at the
 cost of losing Anxiety OD V2's real sound board-wide too.
+
+## Optional mods
+
+The installer can add other mods alongside NAM, or instead of it — untick the
+NAM mod to leave the stock amp/pedal behavior alone. Each mod's own README has
+the details.
+
+| Mod | What it does | Models |
+|---|---|---|
+| NAM (up to 2 instances) | the NAM pedal described above | all |
+| NAM: also Anxiety OD V2 (up to 4 instances) | see "2 instances vs up to 4" above | all |
+| [USB serial console](mods/usb_console/README.md) | root shell over USB, plus a spare serial channel — **anyone with USB access gets root** | MX5 |
+| [Remote screen](mods/remote_screen/README.md) | see and operate the device's screen from a computer (browser viewer, no install) | MX5 |
+| [Tuner tempo edit](mods/tuner_tempo/README.md) | tap the tuner screen's tempo box to step BPM down/up | MX5 |
+
+The MX5-only mods were built and tested on an MX5; the installer won't apply
+them to other models. See [mods/README.md](mods/README.md) for what porting
+them would take.
 
 ## Supported models
 
@@ -138,6 +157,8 @@ TONE and LEVEL are both **unity at 50%**, then diverge:
   hood.
 - [docs/BUILDING.md](docs/BUILDING.md) — building `headrush-nam-gui` from
   source.
+- [mods/README.md](mods/README.md) — the optional non-NAM mods, adding a new
+  one, and porting them to other models.
 - [docs/ADDITIVE_PEDAL.md](docs/ADDITIVE_PEDAL.md) — research notes on an
   unshipped, non-hijacking pedal design.
 

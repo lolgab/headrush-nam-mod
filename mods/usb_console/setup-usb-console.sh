@@ -5,7 +5,7 @@
 # shows up on the host as two USB serial ports (/dev/ttyACM0-1 on Linux/macOS,
 # two COM ports on Windows):
 #   ttyGS0 -- root shell, attached by usb-console-shell.service
-#   ttyGS1 -- free data channel (used by tools/mx5_remote_screen)
+#   ttyGS1 -- free data channel (used by mods/remote_screen)
 #
 # Both are created here rather than added later at runtime: configfs gadget
 # state does not survive a reboot, so a channel added by hand disappears on

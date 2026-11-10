@@ -1,17 +1,14 @@
-# MX5 UI mods (QML source-fallback)
+# Tuner tempo edit (QML source-fallback)
 
-Standalone tools for modifying the HeadRush MX5's on-screen UI, independent of
-the NAM mod. Each script takes `<input Update.img> <output Update.img>` and never
-touches its input, so mods compose by chaining:
+Makes the tuner screen's tempo box adjustable by touch, independent of the NAM
+mod. Install it by ticking **Tuner tempo edit** in the installer (or
+`--mods tuner-tempo` on `gui-core-cli`).
 
-```sh
-./build_tuner_tempo.py stock.img out.img
-```
-
-Requires `debugfs` (e2fsprogs), `xz`, `mkimage` (u-boot-tools), and Python 3.
-Tested against **MX5 firmware 2.7** (`compatible = "inmusic,hg04"`); the scripts
-refuse to run on anything else, since every offset is specific to one build of
-`Evil`.
+Tested against **MX5 firmware 2.7** (`compatible = "inmusic,hg04"`); the
+installer refuses to apply it anywhere else, since every offset is specific to
+one build of `Evil`. The apply step is `nam_mod_apply_tuner_tempo()` in
+`core/device_mods.c`; per-model offsets live in its `TUNER_TEMPO_TARGETS`
+table.
 
 ## The technique: why editing QML "does nothing", and how to fix that
 
@@ -46,8 +43,8 @@ The `.qml` source is a length-prefixed Qt resource entry. Changing its length
 would require fixing that prefix *and* every subsequent entry's offset in
 `qt_resource_struct`. So these mods rewrite the whole file to the **exact
 original byte count** — spare room is reclaimed by collapsing indentation and
-dropping a comment, then padding with spaces. `build_tuner_tempo.py` enforces
-this and refuses to run if the payload length is wrong.
+dropping a comment, then padding with spaces. The installer enforces
+this and refuses to apply the mod if the payload length is wrong.
 
 ### Finding the offsets for another page or firmware
 
@@ -61,13 +58,10 @@ this and refuses to run if the payload length is wrong.
   `qv4cdata` magic before those literals; its size is the `uint32` at
   `magic + 0x24`.
 
-## Mods here
+## The tuner tempo edit
 
-| Script | What it does |
-|---|---|
-| `build_tuner_tempo.py` | Tuner screen: tap the left/right half of the tempo box to step BPM −1/+1 (stock is read-only; only tap-tempo could change it) |
-
-### Tuner tempo edit
+Tap the left/right half of the tempo box to step BPM −1/+1 (stock is read-only;
+only tap-tempo could change it).
 
 The stock tuner page renders tempo read-only:
 
@@ -76,7 +70,7 @@ TunerBPMInfo { x: 469; y: 263; ...; headline: "Tempo"
                prop: Evil.getProperty("/Engine/TempoCtrl/Tempo") }
 ```
 
-`payload/Tuner.qml` wraps that same display in a `MouseArea` and writes the
+`Tuner_mx5.qml` wraps that same display in a `MouseArea` and writes the
 engine property directly:
 
 ```qml

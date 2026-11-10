@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build_blobs.sh -- (re)builds blobs/{libnam_hook.so,libnam_preload.so,
-# trampoline_gonk.bin} from patch/*.cpp, via the docker/Dockerfile ARM
+# trampoline_gonk.bin,mx5_screen_server} from patch/*.cpp and
+# mods/remote_screen/, via the docker/Dockerfile ARM
 # cross-toolchain. The actual compile logic lives in build_blobs_native.sh
 # (also used directly, without Docker, by .github/workflows/gui-build.yml's
 # Linux CI runner) -- this script is just the Docker wrapper for local dev
@@ -36,4 +37,4 @@ docker run --rm \
     "$IMAGE" \
     scripts/build_blobs_native.sh
 
-echo "OK  wrote $DIR/blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin}"
+echo "OK  wrote $DIR/blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,mx5_screen_server}"

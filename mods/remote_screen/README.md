@@ -3,8 +3,8 @@
 Mirror the HeadRush MX5's display on a PC over USB, and operate it with the
 mouse. **Confirmed working on real MX5 hardware** (firmware 2.7).
 
-Requires the second USB serial channel from [`../mx5_usb_console`](../mx5_usb_console)
-(`ttyGS1`), so flash that first.
+Requires the second USB serial channel from [`../usb_console`](../usb_console)
+(`ttyGS1`); the installer selects that mod automatically when you pick this one.
 
 ```
                 MX5                                    PC
@@ -16,15 +16,13 @@ Requires the second USB serial channel from [`../mx5_usb_console`](../mx5_usb_co
 
 ### Installed (recommended)
 
-`./build_install_screen.py` bakes the server into the firmware and enables it at
-boot, so the screen share is live as soon as the device is up — no login, and no
-re-pasting the binary after every reboot. Chain it after the gadget mod:
-
-```sh
-../mx5_usb_console/build_usb_console.py stock.img a.img
-./build.sh                                            # produce the ARM binary
-./build_install_screen.py                a.img     final.img
-```
+Tick **Remote screen** in the installer (or `--mods usb-console,remote-screen`
+on `gui-core-cli`). That bakes the server into the firmware as
+`/usr/Evil/mx5_screen_server` and enables `mx5-screen.service` at boot, so the
+screen share is live as soon as the device is up — no login, and no re-pasting
+the binary after every reboot. The server binary is cross-compiled from
+`mx5_screen_server.c` along with the NAM libraries
+(`scripts/build_blobs_native.sh`) and embedded in the installer.
 
 Then open a viewer. Two are provided; they speak the same protocol and are
 interchangeable.

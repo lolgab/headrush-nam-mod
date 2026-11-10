@@ -2,7 +2,7 @@
 # build.sh -- cross-compile mx5_screen_server for the MX5 and emit a paste-able
 # deploy blob.
 #
-# The device has a root shell over USB (tools/mx5_usb_console), so we don't need
+# The device has a root shell over USB (mods/usb_console), so we don't need
 # to reflash to iterate: gzip+base64 the binary, paste it into that shell, and
 # busybox's base64/gunzip reconstruct it. A flash is only needed if you later
 # want this to persist.

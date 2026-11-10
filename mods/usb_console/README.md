@@ -6,19 +6,18 @@ the MX5 into a computer and it enumerates as **two** USB serial ports:
 | Port | Purpose |
 |---|---|
 | `ttyGS0` (lower COM number) | root shell |
-| `ttyGS1` | free data channel, used by `tools/mx5_remote_screen` |
+| `ttyGS1` | free data channel, used by `mods/remote_screen` |
 
 Opening the first gives a shell on the device.
 
 Confirmed working on real MX5 hardware (appears as a COM port on Windows).
 
-```sh
-./build_usb_console.py <stock Update.img> <output Update.img>
-```
-
-Requires `debugfs` (e2fsprogs), `xz`, `mkimage` (u-boot-tools), Python 3. The
-input file is never modified, and the script refuses to run on anything but MX5
-2.7 (`compatible = "inmusic,hg04"`).
+**Installing:** tick **USB serial console** in the installer (or pass
+`--mods usb-console` to `gui-core-cli`, see `docs/BUILDING.md`). It can be
+combined with any other mod, with or without NAM. The installer refuses to apply
+it to anything but the MX5, and refuses if either stock script it patches doesn't
+look as expected. The files in this directory are installed verbatim; the apply
+step is `nam_mod_apply_usb_console()` in `core/device_mods.c`.
 
 **Connecting**
 
@@ -102,7 +101,7 @@ There is **no SSH server** in the rootfs (no dropbear/sshd; busybox here has
 `dropbear` binary.
 
 **Screen mirroring** turned out to be practical after all — see
-`tools/mx5_remote_screen`. Qt has no VNC platform plugin (eglfs only), but the
+`mods/remote_screen`. Qt has no VNC platform plugin (eglfs only), but the
 `eglfs_mali` backend presents through fbdev, so `/dev/fb0` holds the live
 composited screen and can simply be read. Touch is injected back through
 `/dev/uinput`. It streams over the `ttyGS1` channel this mod provides.
