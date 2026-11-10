@@ -6,8 +6,14 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--instances 2|4] [--keep-work-dir]
+ *                      [--mods nam,usb-console,...] [--instances 2|4]
+ *                      [--keep-work-dir]
+ *        gui-core-cli --list-mods
+ *
+ * --mods defaults to "nam" (the original behavior). --instances 4 is
+ * shorthand for adding nam-4x to the list.
  */
+#include "mods.h"
 #include "patch_pipeline.h"
 #include "tempdir.h"
 
@@ -64,22 +70,62 @@ static void print_progress(const char* message, void* user_data)
   printf("%s\n", message);
 }
 
+static void list_mods(void)
+{
+  printf("Available mods (--mods takes a comma-separated list of keys):\n\n");
+  for (int i = 0; i < NAM_MOD_COUNT; ++i)
+  {
+    const NamModInfo* m = &NAM_MODS[i];
+    printf("  %-14s %s\n", m->key, m->title);
+    printf("  %-14s %s\n", "", m->description);
+    printf("  %-14s models: %s", "", nam_mod_models_str(m));
+    if (m->requires != NAM_MOD_COUNT)
+      printf("; requires: %s", NAM_MODS[m->requires].key);
+    printf("\n\n");
+  }
+}
+
+static void parse_mods(const char* list, NamModSelection* sel)
+{
+  memset(sel, 0, sizeof(*sel));
+  char buf[512];
+  snprintf(buf, sizeof(buf), "%s", list);
+  for (char* tok = strtok(buf, ","); tok; tok = strtok(NULL, ","))
+  {
+    const NamModInfo* m = nam_mod_by_key(tok);
+    if (!m)
+      die("unknown mod '%s' (see --list-mods)", tok);
+    sel->enabled[m->id] = true;
+  }
+}
+
 int main(int argc, char** argv)
 {
+  for (int i = 1; i < argc; ++i)
+    if (strcmp(argv[i], "--list-mods") == 0)
+    {
+      list_mods();
+      return 0;
+    }
+
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--instances 2|4] [--keep-work-dir]",
-        argv[0]);
+    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--mods LIST] [--instances 2|4] "
+        "[--keep-work-dir]\n       %s --list-mods",
+        argv[0], argv[0]);
 
   const char* input_img = argv[1];
   const char* output_img = argv[2];
   const char* model_name = NULL;
   bool keep_work_dir = false;
   int instances = 2;
+  NamModSelection mods = nam_mods_default();
 
   for (int i = 3; i < argc; ++i)
   {
     if (strcmp(argv[i], "--model") == 0 && i + 1 < argc)
       model_name = argv[++i];
+    else if (strcmp(argv[i], "--mods") == 0 && i + 1 < argc)
+      parse_mods(argv[++i], &mods);
     else if (strcmp(argv[i], "--instances") == 0 && i + 1 < argc)
     {
       const char* v = argv[++i];
@@ -95,6 +141,8 @@ int main(int argc, char** argv)
     else
       die("unknown argument: %s", argv[i]);
   }
+  if (instances == 4)
+    mods.enabled[NAM_MOD_NAM_4X] = true;
 
   if (!model_name)
     die("--model is required (pedalboard|mx5|gigboard) -- no default target");
@@ -111,7 +159,7 @@ int main(int argc, char** argv)
   uint8_t* out_data;
   size_t out_len;
   char err[1024];
-  bool ok = nam_patch_pipeline(input_data, input_len, model_name, instances == 4, workdir, print_progress, NULL,
+  bool ok = nam_patch_pipeline(input_data, input_len, model_name, &mods, workdir, print_progress, NULL,
                                 &out_data, &out_len, err, sizeof(err));
   free(input_data);
 
@@ -131,6 +179,6 @@ int main(int argc, char** argv)
   else
     nam_remove_dir_recursive(workdir);
 
-  printf("\nOK  Anxiety OD (v1)%s process() NAM hijack applied.\n", instances == 4 ? " + Anxiety OD V2" : "");
+  printf("\nOK  applied mods: %s\n", nam_mods_selection_str(&mods));
   return 0;
 }

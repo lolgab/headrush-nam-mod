@@ -1,6 +1,7 @@
 /* patch_pipeline.c -- see patch_pipeline.h. */
 #include "patch_pipeline.h"
 
+#include "device_mods.h"
 #include "elf_patch.h"
 #include "ext4_image.h"
 #include "fit_image.h"
@@ -90,8 +91,9 @@ static bool write_whole_file(const char* path, const uint8_t* data, size_t len, 
 }
 
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         bool enable_v2_hijack, const char* workdir, NamProgressFn progress, void* progress_user_data,
-                         uint8_t** out_img_data, size_t* out_img_len, char* err, size_t err_size)
+                         const NamModSelection* mods, const char* workdir, NamProgressFn progress,
+                         void* progress_user_data, uint8_t** out_img_data, size_t* out_img_len, char* err,
+                         size_t err_size)
 {
   *out_img_data = NULL;
   *out_img_len = 0;
@@ -141,6 +143,11 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   else
     report(progress, progress_user_data, "OK  model target: %s", target->name);
 
+  if (!nam_mods_validate(mods, target->name, err, err_size))
+    goto cleanup;
+  const bool want_nam = mods->enabled[NAM_MOD_NAM];
+  report(progress, progress_user_data, "OK  mods selected: %s", nam_mods_selection_str(mods));
+
   uint32_t splash_off, splash_len, recov_off, recov_len, rootfs_off, rootfs_len;
   if (!nam_fit_get_bytes(&props, "//images/splash", "data", &splash_off, &splash_len)
       || !nam_fit_get_bytes(&props, "//images/recoverysplash", "data", &recov_off, &recov_len)
@@ -173,87 +180,116 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   if (!nam_ext4_dump(img, "/usr/Evil/Evil", &evil_data, &evil_len, err, err_size))
     goto cleanup;
 
-  size_t script_len;
-  if (!nam_ext4_dump(img, "/usr/Evil/Scripts/evil", &script_data_raw, &script_len, err, err_size))
-    goto cleanup;
-  script_data = (char*)malloc(script_len + 1);
-  if (!script_data)
-  {
-    set_err(err, err_size, "out of memory");
-    goto cleanup;
-  }
-  memcpy(script_data, script_data_raw, script_len);
-  script_data[script_len] = '\0';
-  free(script_data_raw);
-  script_data_raw = NULL;
+  /* Evil is only re-injected if some mod actually changed it, so a
+   * selection of only rootfs-level mods leaves the stock binary untouched. */
+  bool evil_modified = false;
 
-  const uint8_t* tramp = g_nam_trampoline_gonk_bin;
-  size_t tramp_len = (size_t)g_nam_trampoline_gonk_bin_len;
-  if (tramp_len != 32)
+  if (want_nam)
   {
-    set_err(err, err_size, "embedded trampoline_gonk.bin is %zu bytes, expected exactly 32", tramp_len);
-    goto cleanup;
-  }
-
-  ElfPatchResult elf_result;
-  if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
-                                 &elf_result, err, err_size))
-    goto cleanup;
-  report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
-         elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
-
-  ElfPatchResult elf_result_v2;
-  bool has_v2_hijack = false;
-  if (enable_v2_hijack)
-  {
-    if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
-                                   target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+    size_t script_len;
+    if (!nam_ext4_dump(img, "/usr/Evil/Scripts/evil", &script_data_raw, &script_len, err, err_size))
       goto cleanup;
-    has_v2_hijack = true;
-    report(progress, progress_user_data, "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
-           elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
-  }
-
-  if (target->qml_rename_count > 0)
-  {
-    if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
+    script_data = (char*)malloc(script_len + 1);
+    if (!script_data)
+    {
+      set_err(err, err_size, "out of memory");
       goto cleanup;
-    report(progress, progress_user_data, "OK  QML knob labels relabeled");
+    }
+    memcpy(script_data, script_data_raw, script_len);
+    script_data[script_len] = '\0';
+    free(script_data_raw);
+    script_data_raw = NULL;
+
+    const uint8_t* tramp = g_nam_trampoline_gonk_bin;
+    size_t tramp_len = (size_t)g_nam_trampoline_gonk_bin_len;
+    if (tramp_len != 32)
+    {
+      set_err(err, err_size, "embedded trampoline_gonk.bin is %zu bytes, expected exactly 32", tramp_len);
+      goto cleanup;
+    }
+
+    ElfPatchResult elf_result;
+    if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
+                                   &elf_result, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
+           elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
+
+    ElfPatchResult elf_result_v2;
+    bool has_v2_hijack = false;
+    if (mods->enabled[NAM_MOD_NAM_4X])
+    {
+      if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
+                                     target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+        goto cleanup;
+      has_v2_hijack = true;
+      report(progress, progress_user_data,
+             "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
+             elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
+    }
+
+    if (target->qml_rename_count > 0)
+    {
+      if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
+        goto cleanup;
+      report(progress, progress_user_data, "OK  QML knob labels relabeled");
+    }
+    else
+    {
+      report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
+             target->name);
+    }
+    evil_modified = true;
+
+    char hook_slot_hex[32];
+    snprintf(hook_slot_hex, sizeof(hook_slot_hex), "0x%x", elf_result.hook_slot_addr);
+    char hook_slot_v2_hex[32];
+    if (has_v2_hijack)
+      snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
+    if (!nam_build_launcher_script(script_data, hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL, &new_script,
+                                    err, err_size))
+      goto cleanup;
+    free(script_data);
+    script_data = NULL;
+
+    if (!nam_ext4_inject(img, "/usr/Evil/libnam_hook.so", g_nam_hook_so, (size_t)g_nam_hook_so_len, 0755, err,
+                          err_size))
+      goto cleanup;
+    if (!nam_ext4_inject(img, "/usr/Evil/libnam_preload.so", g_nam_preload_so, (size_t)g_nam_preload_so_len, 0755,
+                          err, err_size))
+      goto cleanup;
+    if (!nam_ext4_inject(img, "/usr/Evil/Scripts/evil", (const uint8_t*)new_script, strlen(new_script), 0755, err,
+                          err_size))
+      goto cleanup;
+    report(progress, progress_user_data, "OK  injected libnam_hook.so, libnam_preload.so, launcher script");
   }
-  else
+
+  if (mods->enabled[NAM_MOD_TUNER_TEMPO])
   {
-    report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
-           target->name);
+    if (!nam_mod_apply_tuner_tempo(evil_data, evil_len, target->name, progress, progress_user_data, err, err_size))
+      goto cleanup;
+    evil_modified = true;
   }
 
-  char hook_slot_hex[32];
-  snprintf(hook_slot_hex, sizeof(hook_slot_hex), "0x%x", elf_result.hook_slot_addr);
-  char hook_slot_v2_hex[32];
-  if (has_v2_hijack)
-    snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
-  if (!nam_build_launcher_script(script_data, hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL, &new_script,
-                                  err, err_size))
-    goto cleanup;
-  free(script_data);
-  script_data = NULL;
+  if (evil_modified)
+  {
+    if (!nam_ext4_inject(img, "/usr/Evil/Evil", evil_data, evil_len, 0755, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data, "OK  injected patched Evil");
+  }
 
-  if (!nam_ext4_inject(img, "/usr/Evil/Evil", evil_data, evil_len, 0755, err, err_size))
-    goto cleanup;
+  if (mods->enabled[NAM_MOD_USB_CONSOLE])
+  {
+    if (!nam_mod_apply_usb_console(img, target->name, progress, progress_user_data, err, err_size))
+      goto cleanup;
+  }
 
-  const uint8_t* hook_so = g_nam_hook_so;
-  size_t hook_so_len = (size_t)g_nam_hook_so_len;
-  const uint8_t* preload_so = g_nam_preload_so;
-  size_t preload_so_len = (size_t)g_nam_preload_so_len;
-
-  if (!nam_ext4_inject(img, "/usr/Evil/libnam_hook.so", hook_so, hook_so_len, 0755, err, err_size))
-    goto cleanup;
-  if (!nam_ext4_inject(img, "/usr/Evil/libnam_preload.so", preload_so, preload_so_len, 0755, err, err_size))
-    goto cleanup;
-  if (!nam_ext4_inject(img, "/usr/Evil/Scripts/evil", (const uint8_t*)new_script, strlen(new_script), 0755, err,
-                        err_size))
-    goto cleanup;
-  report(progress, progress_user_data,
-         "OK  injected patched Evil, libnam_hook.so, libnam_preload.so, launcher script");
+  /* After usb-console: it provides the /dev/ttyGS1 this serves on. */
+  if (mods->enabled[NAM_MOD_REMOTE_SCREEN])
+  {
+    if (!nam_mod_apply_remote_screen(img, target->name, progress, progress_user_data, err, err_size))
+      goto cleanup;
+  }
 
   if (!nam_ext4_verify_basic(img, err, err_size))
     goto cleanup;

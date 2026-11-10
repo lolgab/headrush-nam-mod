@@ -94,7 +94,8 @@ deadline -- same mechanism as
 
 By default the build only hijacks Anxiety OD (v1), which the stock firmware's
 block-add menu allows up to twice per board -- 2 NAM instances max. The GUI's
-"Up to 4 instances" radio option (mirrored by the CLI's `--instances 4`) also
+"Also use Anxiety OD V2 for NAM (up to 4 instances)" mod (the CLI's
+`--mods nam,nam-4x`, or `--instances 4`) also
 hijacks **Anxiety OD V2** (internal class `AnxietyV2`), a separate,
 sibling pedal type also addable up to twice, for up to 4 total.
 

@@ -28,6 +28,7 @@
 
 #include "http_download.h"
 #include "model_targets.h"
+#include "mods.h"
 #include "nam_library.h"
 #include "patch_pipeline.h"
 #include "tempdir.h"
@@ -167,7 +168,7 @@ typedef struct
   SDL_mutex* mutex;
   AppState state;
   int selected_model;
-  bool enable_v2_hijack; /* false = 2 instances (Anxiety OD only), true = up to 4 (also Anxiety OD V2) */
+  NamModSelection mods; /* which mods to install, see core/mods.h */
   char log_lines[MAX_LOG_LINES][256];
   int log_count;
   uint64_t dl_downloaded, dl_total;
@@ -363,10 +364,10 @@ static int worker_main(void* data)
   AppShared* shared = (AppShared*)data;
 
   int model_index;
-  bool enable_v2_hijack;
+  NamModSelection mods;
   SDL_LockMutex(shared->mutex);
   model_index = shared->selected_model;
-  enable_v2_hijack = shared->enable_v2_hijack;
+  mods = shared->mods;
   shared->downloading = true;
   SDL_UnlockMutex(shared->mutex);
 
@@ -493,8 +494,8 @@ static int worker_main(void* data)
 
   uint8_t* out_data;
   size_t out_len;
-  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, enable_v2_hijack, workdir, progress_to_log, shared,
-                          &out_data, &out_len, err, sizeof(err));
+  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, &mods, workdir, progress_to_log, shared, &out_data,
+                          &out_len, err, sizeof(err));
   free(stock_img);
 
   if (!ok)
@@ -821,6 +822,7 @@ int main(int argc, char** argv)
   shared.mutex = SDL_CreateMutex();
   shared.state = APP_STATE_PICK;
   shared.selected_model = 0;
+  shared.mods = nam_mods_default();
 
   LibraryState lib;
   memset(&lib, 0, sizeof(lib));
@@ -851,11 +853,9 @@ int main(int argc, char** argv)
       if (state == APP_STATE_PICK)
       {
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Pick your device, then click Install.", NK_TEXT_LEFT);
+        nk_label(ctx, "Pick your device and the mods you want, then click Install.", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Downloads the official stock firmware and applies the NAM mod --", NK_TEXT_LEFT);
-        nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "no terminal, no extra tools needed.", NK_TEXT_LEFT);
+        nk_label(ctx, "Downloads the official stock firmware and applies them -- no extra tools.", NK_TEXT_LEFT);
 
         nk_layout_row_dynamic(ctx, 30, 1);
         for (int i = 0; i < NAM_MODEL_COUNT; ++i)
@@ -866,19 +866,45 @@ int main(int argc, char** argv)
         }
 
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "NAM instances:", NK_TEXT_LEFT);
-        nk_layout_row_dynamic(ctx, 30, 1);
+        nk_label(ctx, "Mods:", NK_TEXT_LEFT);
+        const char* model_name = NAM_MODEL_TARGETS[shared.selected_model].name;
+        bool any_selected = false;
+        for (int i = 0; i < NAM_MOD_COUNT; ++i)
         {
-          int two = !shared.enable_v2_hijack;
-          if (nk_option_label(ctx, "2 instances (Anxiety OD only)", two) && !two)
-            shared.enable_v2_hijack = false;
-          int four = shared.enable_v2_hijack;
-          if (nk_option_label(ctx, "Up to 4 instances (also hijacks Anxiety OD V2)", four) && !four)
-            shared.enable_v2_hijack = true;
+          const NamModInfo* mod = &NAM_MODS[i];
+          bool supported = nam_mod_supports_model(mod, model_name);
+          if (!supported)
+            shared.mods.enabled[i] = false; /* never carry a selection over to a model it can't apply to */
+
+          char label[200];
+          if (supported)
+            snprintf(label, sizeof(label), "%s", mod->title);
+          else
+            snprintf(label, sizeof(label), "%s  [%s only]", mod->title, nam_mod_models_str(mod));
+
+          nk_layout_row_dynamic(ctx, 26, 1);
+          nk_bool checked = shared.mods.enabled[i];
+          if (!supported)
+            nk_widget_disable_begin(ctx);
+          if (nk_checkbox_label(ctx, label, &checked) && supported)
+          {
+            shared.mods.enabled[i] = checked;
+            if (checked && mod->requires != NAM_MOD_COUNT)
+              shared.mods.enabled[mod->requires] = true; /* pull in what it needs */
+            if (!checked)
+              for (int j = 0; j < NAM_MOD_COUNT; ++j) /* drop what needed it */
+                if (NAM_MODS[j].requires == (NamModId)i)
+                  shared.mods.enabled[j] = false;
+          }
+          if (!supported)
+            nk_widget_disable_end(ctx);
+          any_selected = any_selected || shared.mods.enabled[i];
         }
 
         nk_layout_row_dynamic(ctx, 40, 1);
-        if (nk_button_label(ctx, "Install NAM Mod"))
+        if (!any_selected)
+          nk_widget_disable_begin(ctx);
+        if (nk_button_label(ctx, any_selected ? "Install" : "Install (select at least one mod)") && any_selected)
         {
           SDL_LockMutex(shared.mutex);
           shared.state = APP_STATE_RUNNING;
@@ -887,6 +913,8 @@ int main(int argc, char** argv)
           SDL_UnlockMutex(shared.mutex);
           worker_thread = SDL_CreateThread(worker_main, "nam-worker", &shared);
         }
+        if (!any_selected)
+          nk_widget_disable_end(ctx);
 
         nk_layout_row_dynamic(ctx, 30, 1);
         if (nk_button_label(ctx, "Prepare NAM Library..."))
@@ -940,7 +968,7 @@ int main(int argc, char** argv)
         SDL_UnlockMutex(shared.mutex);
 
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Done! NAM mod applied.", NK_TEXT_LEFT);
+        nk_label(ctx, "Done! Mods applied.", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);
         nk_label(ctx, "Wrote:", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);

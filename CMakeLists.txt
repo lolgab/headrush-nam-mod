@@ -53,6 +53,29 @@ add_custom_command(
   VERBATIM
 )
 
+# Same embedding for the non-NAM mods' payloads (see core/mods.h): small
+# text files straight from mods/<mod>/, plus mx5_screen_server, which is
+# cross-compiled into blobs/ with the NAM libraries.
+function(nam_embed_payload SRC SYMBOL)
+  set(OUT ${NAM_BLOBS_GENERATED_DIR}/payload_${SYMBOL}.c)
+  add_custom_command(
+    OUTPUT ${OUT}
+    COMMAND $<TARGET_FILE:bin2c> ${SRC} ${OUT} ${SYMBOL}
+    DEPENDS bin2c ${SRC}
+    COMMENT "Embedding ${SRC} as a C byte array"
+    VERBATIM
+  )
+  set(NAM_MOD_PAYLOAD_SOURCES ${NAM_MOD_PAYLOAD_SOURCES} ${OUT} PARENT_SCOPE)
+endfunction()
+set(NAM_MOD_PAYLOAD_SOURCES)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/mods/usb_console/setup-usb-console.sh g_mod_setup_usb_console_sh)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/mods/usb_console/remove-usb-console.sh g_mod_remove_usb_console_sh)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/mods/usb_console/usb-console.service g_mod_usb_console_service)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/mods/usb_console/usb-console-shell.service g_mod_usb_console_shell_service)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/blobs/mx5_screen_server g_mod_mx5_screen_server)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/mods/remote_screen/mx5-screen.service g_mod_mx5_screen_service)
+nam_embed_payload(${CMAKE_SOURCE_DIR}/mods/tuner_tempo/Tuner_mx5.qml g_mod_tuner_mx5_qml)
+
 add_library(nam_gui_core STATIC
   core/model_targets.c
   core/fit_image.c
@@ -62,11 +85,14 @@ add_library(nam_gui_core STATIC
   core/xz_codec.c
   core/launcher_script.c
   core/patch_pipeline.c
+  core/mods.c
+  core/device_mods.c
   core/http_download.c
   core/zip_reader.c
   core/tempdir.c
   core/nam_library.c
   ${NAM_BLOBS_GENERATED_SOURCES}
+  ${NAM_MOD_PAYLOAD_SOURCES}
   third_party/sha1/sha1.c
   third_party/miniz/miniz.c
   third_party/miniz/miniz_tdef.c
@@ -209,6 +235,7 @@ file(GLOB NAM_HOOK_SOURCES
   ${CMAKE_SOURCE_DIR}/patch/nam_hook.cpp
   ${CMAKE_SOURCE_DIR}/patch/nam_preload.cpp
   ${CMAKE_SOURCE_DIR}/patch/trampoline_gonk.S
+  ${CMAKE_SOURCE_DIR}/mods/remote_screen/mx5_screen_server.c
 )
 file(GLOB_RECURSE NAM_CORE_SOURCES
   ${CMAKE_SOURCE_DIR}/nam_core/NAM/*.cpp
@@ -218,6 +245,7 @@ set(NAM_BLOBS
   ${CMAKE_SOURCE_DIR}/blobs/libnam_hook.so
   ${CMAKE_SOURCE_DIR}/blobs/libnam_preload.so
   ${CMAKE_SOURCE_DIR}/blobs/trampoline_gonk.bin
+  ${CMAKE_SOURCE_DIR}/blobs/mx5_screen_server
 )
 add_custom_command(
   OUTPUT ${NAM_BLOBS}

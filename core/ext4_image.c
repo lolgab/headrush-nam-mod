@@ -145,9 +145,15 @@ static errcode_t remove_if_exists(ext2_filsys fs, ext2_ino_t parent, const char*
 
   if (inode.i_links_count == 0)
   {
-    retval = ext2fs_block_iterate3(fs, ino, BLOCK_FLAG_READ_ONLY, NULL, free_block_cb, NULL);
-    if (retval)
-      return retval;
+    /* A fast symlink keeps its target string in i_block itself, so there
+     * are no data blocks to free -- iterating would misread the string as
+     * block numbers. */
+    if (!ext2fs_is_fast_symlink(&inode))
+    {
+      retval = ext2fs_block_iterate3(fs, ino, BLOCK_FLAG_READ_ONLY, NULL, free_block_cb, NULL);
+      if (retval)
+        return retval;
+    }
     ext2fs_inode_alloc_stats2(fs, ino, -1, LINUX_S_ISDIR(inode.i_mode));
     inode.i_dtime = (__u32)time(NULL);
   }
@@ -316,6 +322,59 @@ bool nam_ext4_inject(Ext4Image* img, const char* inner_path, const uint8_t* data
   if (retval)
   {
     set_err_code(err, err_size, retval, "closing new file");
+    return false;
+  }
+  return true;
+}
+
+bool nam_ext4_exists(Ext4Image* img, const char* inner_path)
+{
+  ext2_ino_t ino;
+  return ext2fs_namei(img->fs, EXT2_ROOT_INO, EXT2_ROOT_INO, inner_path, &ino) == 0;
+}
+
+bool nam_ext4_symlink(Ext4Image* img, const char* link_path, const char* target, char* err, size_t err_size)
+{
+  char parent_path[512], base[256];
+  if (!split_path(link_path, parent_path, sizeof(parent_path), base, sizeof(base)))
+  {
+    set_err(err, err_size, "invalid inner path %s", link_path);
+    return false;
+  }
+
+  ext2_ino_t parent_ino;
+  errcode_t retval = ext2fs_namei(img->fs, EXT2_ROOT_INO, EXT2_ROOT_INO, parent_path, &parent_ino);
+  if (retval)
+  {
+    set_err_code(err, err_size, retval, parent_path);
+    return false;
+  }
+
+  retval = remove_if_exists(img->fs, parent_ino, base);
+  if (retval)
+  {
+    set_err_code(err, err_size, retval, "removing pre-existing entry");
+    return false;
+  }
+
+  /* ext2fs_symlink allocates the inode, writes it (as a fast symlink for
+   * targets this short) and links it into the parent. It does not grow a
+   * full directory itself; a failed link happens before any inode/block
+   * accounting, so expanding and retrying is clean. */
+  retval = ext2fs_symlink(img->fs, parent_ino, 0, base, target);
+  if (retval == EXT2_ET_DIR_NO_SPACE)
+  {
+    retval = ext2fs_expand_dir(img->fs, parent_ino);
+    if (retval)
+    {
+      set_err_code(err, err_size, retval, "expanding parent directory");
+      return false;
+    }
+    retval = ext2fs_symlink(img->fs, parent_ino, 0, base, target);
+  }
+  if (retval)
+  {
+    set_err_code(err, err_size, retval, "creating symlink");
     return false;
   }
   return true;
