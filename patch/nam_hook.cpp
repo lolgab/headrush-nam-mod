@@ -1824,10 +1824,15 @@ void clone_desc(uintptr_t dst, uintptr_t src)
   std::memcpy(reinterpret_cast<void*>(dst + 0x18), d + 0x18, kDescSize - 0x18);
 }
 
-// Same, from a saved copy of the donor's bytes (the live FX-Loop desc is replaced by the UI like any other)
+// Same, from a saved copy of the donor's bytes (the live FX-Loop desc is replaced by the UI like any other), but the
+// fader's CURRENT value (+0x18 and its copy at +0x20) is left alone: this runs on a desc the UI just made because the
+// user moved the fader, and overwriting the value with the donor's default (0 dB) pushed the fader back to 0 dB, a
+// sudden jump in volume. Only the defaults (+0x1c, +0x24), range, step and format are taken.
 void clone_desc_bytes(uintptr_t dst, const uint8_t* d)
 {
-  std::memcpy(reinterpret_cast<void*>(dst + 0x18), d + 0x18, kDescSize - 0x18);
+  std::memcpy(reinterpret_cast<void*>(dst + 0x1c), d + 0x1c, 4);
+  std::memcpy(reinterpret_cast<void*>(dst + 0x24), d + 0x24, 4);
+  std::memcpy(reinterpret_cast<void*>(dst + 0x28), d + 0x28, kDescSize - 0x28);
 }
 
 void set_desc_format(uintptr_t desc, const std::string& name)
