@@ -169,7 +169,7 @@ typedef struct
   AppState state;
   int selected_model;
   int enable_page_pedal; /* footswitch page-turner mod (Pedalboard only) -- int because nk_checkbox wants int* */
-  int add_nam_pedals;    /* Pedalboard: add the "NAM" / "NAM 2" pedals (default on) */
+  int add_nam_pedals;    /* Pedalboard: add the "NAM" and "NAM TWO" pedals (default on) */
   int anxiety_hijack;    /* opt-in legacy mode: Anxiety OD runs NAM (always on for models without NAM pedals) */
   bool enable_v2_hijack; /* with the hijack: false = 2 instances (Anxiety OD only), true = up to 4 (also Anxiety OD V2) */
   char log_lines[MAX_LOG_LINES][256];
@@ -936,7 +936,7 @@ int main(int argc, char** argv)
         if (pedalboard)
         {
           nk_layout_row_dynamic(ctx, 28, 1);
-          nk_checkbox_label(ctx, "Add the NAM pedals (\"NAM\" and \"NAM 2\" in the Distortion list)",
+          nk_checkbox_label(ctx, "Add the NAM pedals (\"NAM\", \"NAM TWO\": four per rig)",
                             &shared.add_nam_pedals);
           nk_layout_row_dynamic(ctx, 28, 1);
           nk_checkbox_label(ctx, "Also make Anxiety OD run NAM (keeps your existing pedalboards working)",

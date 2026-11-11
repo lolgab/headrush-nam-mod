@@ -18,7 +18,7 @@
  * failure the function returns false and fills `err` instead. */
 typedef void (*NamProgressFn)(const char* message, void* user_data);
 
-/* What to install. On the Pedalboard the default is `nam_pedals` alone: two new pedals, "NAM" and "NAM 2", appear in
+/* What to install. On the Pedalboard the default is `nam_pedals` alone: two new pedals, "NAM" and "NAM TWO" (two instances each, four per rig), appear in
  * the Distortion list and nothing stock is touched. `anxiety_hijack` is the older design, kept opt-in for people whose
  * existing pedalboards use Anxiety OD as the NAM engine: Anxiety OD (v1) itself runs NAM, and with `anxiety_v2` the
  * separate Anxiety OD V2 does too (up to 4 hijacked instances in all). Both can be on together. The other models
@@ -27,7 +27,7 @@ typedef void (*NamProgressFn)(const char* message, void* user_data);
  * Page Down/Up, see docs/PAGE_PEDAL.md and core/page_pedal.h. */
 typedef struct
 {
-  bool nam_pedals;     /* add "NAM" / "NAM 2" (Pedalboard only), see spy_patch.h and docs/ADDITIVE_PEDAL.md */
+  bool nam_pedals;     /* add "NAM" and "NAM TWO" (Pedalboard only), see spy_patch.h and docs/ADDITIVE_PEDAL.md */
   bool anxiety_hijack; /* legacy: Anxiety OD (v1) process() runs NAM */
   bool anxiety_v2;     /* with anxiety_hijack: also hijack Anxiety OD V2's separate process() slot */
   bool page_pedal;

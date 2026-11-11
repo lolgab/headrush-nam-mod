@@ -262,13 +262,14 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     memset(grown + evil_len, 0, 4096);
     evil_data = grown;
     evil_len += 4096;
-    const NamPair pairs[1] = {{"NAM", "NAM", NAM_ENGINE_TYPE, 0}};
-    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 1, err, err_size)
-        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 1, &eng_init_slot, &eng_tab, err, err_size)
-        || !nam_elf_patch_engine_class(evil_data, evil_len, 2, eng_tab, &eng_hook_slot, err, err_size))
+    /* two registry pairs = two picker entries, each addable twice: four NAM pedals per rig */
+    const NamPair pairs[2] = {{"NAM", "NAM", NAM_ENGINE_TYPE, 0}, {"NAM TWO", "NAM TWO", NAM_ENGINE_TYPE, 0}};
+    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 2, err, err_size)
+        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 2, &eng_init_slot, &eng_tab, err, err_size)
+        || !nam_elf_patch_engine_class(evil_data, evil_len, 4, eng_tab, &eng_hook_slot, err, err_size))
       goto cleanup;
     report(progress, progress_user_data,
-           "OK  NAM pedals registered: \"NAM\" and \"NAM 2\" in the Distortion list, engine hook_slot @ 0x%x",
+           "OK  NAM pedals registered: \"NAM\" and \"NAM TWO\" (2 instances each), engine hook_slot @ 0x%x",
            eng_hook_slot);
   }
 

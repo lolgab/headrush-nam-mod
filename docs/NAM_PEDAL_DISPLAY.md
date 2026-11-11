@@ -2,7 +2,7 @@
 
 Notes from reverse engineering how the HeadRush Pedalboard 2.7 UI shows a
 pedal's knob values, and how the additive NAM pedals (**NAM** and
-**NAM 2**, one pair) use it. Everything here was learned on real hardware
+**NAM TWO**, two pairs) use it. Everything here was learned on real hardware
 (firmware 2.7 `Evil`, ARM32, non-PIE Qt/QML) unless marked *unverified*.
 
 Code: `patch/nam_hook.cpp` (the "display" section at the end of the file,

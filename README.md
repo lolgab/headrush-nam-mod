@@ -4,8 +4,9 @@ Reverse-engineered firmware mod for the HeadRush Pedalboard, MX5, and Gigboard, 
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
-**Status**: on the Pedalboard, two real **NAM** pedals (**NAM** and **NAM 2**)
-are added to the Distortion list, next to the stock pedals. On every model,
+**Status**: on the Pedalboard, two real NAM pedals, **NAM** and **NAM TWO**, are
+added to the Distortion list next to the stock pedals; each can be added twice,
+so a rig can hold four NAM pedals. On every model,
 the older design is still available as an opt-in: it makes **Anxiety OD** run
 NAM, so existing pedalboards that use it keep working. See below.
 
@@ -98,17 +99,21 @@ scripting the same operation (`--find-drives` to list detected drives,
 
 ## The pedals
 
-### NAM and NAM 2 (Pedalboard)
+### NAM and NAM TWO (Pedalboard)
 
-On the device, add **NAM** from the **Distortion** list, and **NAM 2** by
-adding it a second time (like any other pedal and its "2" twin). Nothing stock
-is replaced, so every other pedal and every saved pedalboard behaves as before.
+On the device, add **NAM** and **NAM TWO** from the **Distortion** list. Each
+can be added twice (the second copy is titled "NAM 2" / "NAM TWO 2", like any
+other pedal and its "2" twin), so a rig holds up to four NAM pedals. They are
+identical; the second entry exists only because one list entry can be added
+twice at most. Nothing stock is replaced, so every other pedal and every saved
+pedalboard behaves as before.
 
 | Knob | Function | Display |
 |---|---|---|
 | **DRIVE** | selects the `.nam` model | model number `1..N` and the file name |
 | **TONE** | input volume | dB, same scale as the FX Loop SEND |
 | **LEVEL** | output volume | dB, same scale as the FX Loop RETURN |
+| **GAIN** (Low / High) | calibration | **High** = on, see "Gain staging" |
 
 The knob captions can't be changed (they are looked up by name in the
 firmware); they stay DRIVE / TONE / LEVEL. Known quirks: the pedal shows
@@ -164,6 +169,15 @@ flashing another model's file will almost certainly brick the device.
 **NAM pedals**: TONE (input) and LEVEL (output) are dB faders from -60 dB to
 +12 dB (0 dB = unity), the same scale and display as the FX Loop SEND/RETURN.
 The bottom of the travel is silence.
+
+**Calibration** (the Anxiety OD option's Hi-Lo switch does the same): set the
+NAM pedal's **GAIN** switch to **High** and the pedal calibrates itself from the
+`.nam` file's metadata. The input is scaled so the model's own input level
+(dBu at 0 dBFS in its training capture) lines up with a 12.2 dBu interface, the
+rule the NAM plugin uses, and the output is normalized to the model's stated
+loudness (target -18 dB), so switching models keeps roughly the same volume.
+Both are capped at +-24 dB, files without that metadata are left untouched, and
+TONE / LEVEL still trim on top. **Low** (the default) leaves the signal as is.
 
 **Anxiety OD option**: TONE and LEVEL are both **unity at 50%**, then diverge:
 

@@ -9,7 +9,7 @@
  *                      [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal]
  *                      [--keep-work-dir]
  *
- * Pedalboard default: adds the "NAM" / "NAM 2" pedals. --anxiety-hijack additionally (opt-in) makes Anxiety OD run
+ * Pedalboard default: adds the "NAM" and "NAM TWO" pedals (two instances each). --anxiety-hijack additionally (opt-in) makes Anxiety OD run
  * NAM (--instances 4 also hijacks Anxiety OD V2); --no-nam-pedals leaves out the new pedals (hijack only). MX5 and
  * Gigboard have no NAM pedals yet and always get the Anxiety OD hijack.
  */
@@ -160,7 +160,7 @@ int main(int argc, char** argv)
     nam_remove_dir_recursive(workdir);
 
   if (opts.nam_pedals)
-    printf("\nOK  NAM pedals added (\"NAM\" and \"NAM 2\" in the Distortion list).\n");
+    printf("\nOK  NAM pedals added (\"NAM\" and \"NAM TWO\" in the Distortion list, two instances each).\n");
   if (opts.anxiety_hijack)
     printf("%sOK  Anxiety OD (v1)%s process() NAM hijack applied.\n", opts.nam_pedals ? "" : "\n",
            opts.anxiety_v2 ? " + Anxiety OD V2" : "");

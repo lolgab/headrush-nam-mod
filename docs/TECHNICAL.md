@@ -2,7 +2,7 @@
 
 > This is the **opt-in, older** design (the installer's "Also make Anxiety OD
 > run NAM" option; the only mode on MX5 and Gigboard). The default on the
-> Pedalboard is two new pedals, **NAM** and **NAM 2**, that replace nothing:
+> Pedalboard is two new pedals, **NAM** and **NAM TWO** (two instances each), that replace nothing:
 > see [ADDITIVE_PEDAL.md](ADDITIVE_PEDAL.md) and
 > [NAM_PEDAL_DISPLAY.md](NAM_PEDAL_DISPLAY.md). Both can be installed together;
 > they patch different parts of `Evil` and share `libnam_hook.so`.
@@ -47,9 +47,11 @@ With Hi-Lo on, the input is scaled by `interface_dBu - model_input_level_dBu` (t
 `input_level_dbu` stored in the `.nam` metadata; models without it are untouched. The interface level defaults to
 12.2 dBu (`NAM_CAL_DBU` overrides) and the boost/cut is capped at +-24 dB. Tone still trims on top. The output is also normalized: gain is `-18 dB - model_loudness_dB` (`loudness` in the
 `.nam` metadata; `NAM_CAL_LOUDNESS_DB` overrides the target, same ±24 dB cap, models without it untouched), with Level
-trim on top. **Unverified on
-hardware:** the Hi-Lo field offset (`0x55c` Anxiety OD, `0x57c` additive pedals, a guess one slot after Tone;
-`NAM_HILO_OFFSET` overrides) and the 12.2 dBu reference.
+trim on top. The NAM pedals have the same
+calibration: their equivalent of the Hi-Lo switch is the stock **Gain Low/High** switch, **High = on**, off by default.
+**Verified on hardware:** on the NAM pedals the switch is the low byte of the word at engine offset `0x57c` (the word
+reads `0x00010000` off and `0x00010001` on, other flags share it, so the byte is tested, not the whole word). **Unverified
+on hardware:** the Anxiety OD offset (`0x55c`; `NAM_HILO_OFFSET` overrides either) and the 12.2 dBu reference.
 
 The Model knob has a fixed 101 positions (0%-100%, one per whole percent).
 Each position selects one `.nam` file, in alphabetical order, starting at 0%:

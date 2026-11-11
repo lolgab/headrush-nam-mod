@@ -1,7 +1,8 @@
-# The additive NAM pedals (NAM / NAM 2)
+# The additive NAM pedals (NAM / NAM TWO)
 
-A genuinely new pair of pedals, **NAM** and **NAM 2** (one registry pair: the
-firmware builds every pedal as "X" and "X 2"), added to the Pedalboard 2.7
+Two genuinely new pedals, **NAM** and **NAM TWO** (two registry pairs: the
+firmware builds every pedal as "X" and "X 2", so there are four instances,
+"NAM", "NAM 2", "NAM TWO", "NAM TWO 2"), added to the Pedalboard 2.7
 firmware without sacrificing any stock pedal. They appear in the *Distortion*
 list, behave like any other pedal (add, move, bypass, save a rig) and run
 Neural Amp Modeler audio. This is what `gui-core-cli` and the installer do by
@@ -45,8 +46,8 @@ stock ones.
    pedals *by name* from literal lists built by a static initializer
    (`0x66288`): a `std::map<category, vector<string>>` (Distortion call site
    `0x665ac`, count `0x12`). A hook there rebuilds the array with the new
-   names appended, so "NAM" appears at the end of Distortion (its "NAM 2" twin is
-   made by adding it again). (The
+   names appended, so "NAM" and "NAM TWO" appear at the end of Distortion (each
+   one's "2" twin is made by adding it again). (The
    hook must initialize the destination string itself: `0x5b48e0` does not
    and crashes in libc otherwise.)
 3. **Second instance logic.** Picker index `s` maps to ids `2s-1` / `2s` for
@@ -55,10 +56,12 @@ stock ones.
    that function (`0x3cdd10`, `0x3cddd8`, `0x3cdddc`) are bumped so the new
    pairs get stock pair behavior. A single entry owning four ids was tried
    (v22) and abandoned: the picker row greys out after two uses and the logic
-   that does it was never found. The shipped design is therefore one pair
-   (two instances). Two pairs, "NAM A" / "NAM B" for four instances, also
-   worked (v23-v28) and are still supported by the registry code
-   (`NAM_MAX_PAIRS`); the installer ships the single pair.
+   that does it was never found. The shipped design is therefore two pairs, as
+   in the v23-v28 builds ("NAM A" / "NAM B" then, "NAM" / "NAM TWO" now), which
+   gives four instances per rig. A build with a single pair ("NAM" / "NAM 2")
+   was tried and on hardware only the "NAM" entry showed up; the cause was not
+   found (the engine-class setup had only ever run with four ids), and the
+   two-pair layout is the one confirmed to work.
 4. **Property nodes.** A pedal needs nodes in the state tree
    (`/Engine/Patch/...`, `/Engine/MixerCtrl/<name>/<param>`). Stock code
    creates them in code (`0x5f88a8` via `0x594ab4` / `0x5938bc`), so ids with no
@@ -91,10 +94,12 @@ stock ones.
 |---|---|
 | Registry, picker entry, two instances per pedal, rig save, FX-Loop | confirmed on hardware (v21, v23) |
 | two pairs (four instances), as the earlier NAM A / NAM B build | confirmed (v23) |
-| the shipped single pair "NAM" / "NAM 2" (one pair, `ids = 2` engine class) | built; **not yet flashed on hardware** |
+| single pair "NAM" / "NAM 2" (`ids = 2` engine class) | **failed**: only "NAM" showed up; not shipped |
+| the shipped layout, two pairs "NAM" / "NAM TWO" (same code path as NAM A / NAM B) | built; **not yet flashed on hardware** |
 | combined with the Anxiety OD hijack | built; **not yet flashed on hardware** |
 | NAM audio, level / input trim | confirmed (v25, v26) |
 | dB faders on Level / Tone | confirmed (v27/v28 and later hot-deployed libs) |
+| Calibration on the Gain Low/High switch (High = on): input + output normalization | confirmed on hardware |
 | Drive readout (number + file name) | hot-deployed only; consistency of the last build unconfirmed |
 | Captions DRIVE / LEVEL / TONE | cannot be changed (see NAM_PEDAL_DISPLAY.md) |
 | Pedal art | missing: `img/NAM.png` falls back to `img/Other.png` |

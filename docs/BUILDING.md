@@ -102,7 +102,7 @@ build/gui-core-cli <stock Update.img> <out.img> --model pedalboard|mx5|gigboard 
     [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal]
 ```
 
-Pedalboard default: adds the **NAM** / **NAM 2** pedals (see
+Pedalboard default: adds the **NAM** and **NAM TWO** pedals (four instances) (see
 docs/ADDITIVE_PEDAL.md). `--anxiety-hijack` additionally makes Anxiety OD run
 NAM (the older, opt-in design for keeping existing pedalboards working);
 `--instances 4` also hijacks Anxiety OD V2 for up to 4 hijacked instances and

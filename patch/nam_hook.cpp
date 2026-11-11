@@ -457,6 +457,7 @@ constexpr int kMaxChannels = 2;
 
 struct ModelState
 {
+  std::atomic<int> cal_state{-1}; // last Hi-Lo / Gain state seen (for the log line on a change)
   // One independent nam::DSP instance per channel -- NAM models carry
   // internal state (WaveNet hidden state, history ring buffers), so feeding
   // L then R through a single shared instance would corrupt both channels'
@@ -1069,7 +1070,8 @@ struct KnobLayout
 // calibrated input level (nam::DSP::GetInputLevel(), dBu at 0 dBFS in the training capture) lines up with the
 // interface's level -- the same rule the NAM plugin uses: gain_dB = interface_dBu - model_dBu. Models without an
 // input level in their metadata are left alone. The Hi-Lo field's offset (one 0x14 slot after Tone, like Drive/Tone/
-// Level) is NOT hardware-verified; NAM_HILO_OFFSET overrides it, the heartbeat log prints the raw word.
+// Level) is NOT hardware-verified for Anxiety OD; on the additive NAM pedals it is (their "Gain" Low/High switch is the
+// byte at 0x57c, 0 = Low, 1 = High = calibration on). NAM_HILO_OFFSET overrides it, the heartbeat log prints the raw word.
 float calibration_interface_dbu()
 {
   if (const char* env = std::getenv("NAM_CAL_DBU"))
@@ -1082,7 +1084,8 @@ float calibration_max_db()
   return 24.0f; // keep a bogus metadata value from turning into a wall of noise
 }
 
-// The switch's stored word may be a float (1.0f) or an integer/bool (1) -- accept either.
+// The switch is a two-state enum: its low byte is 0 / 1, and other flags share the same word (the additive pedals read
+// 0x00010000 off and 0x00010001 on), so the byte is tested, not the whole word. A float 1.0f is accepted too.
 bool hilo_is_on(const void* this_, uint32_t offset)
 {
   if (const char* env = std::getenv("NAM_HILO_OFFSET"))
@@ -1091,7 +1094,7 @@ bool hilo_is_on(const void* this_, uint32_t offset)
   std::memcpy(&word, static_cast<const uint8_t*>(this_) + offset, sizeof word);
   float f;
   std::memcpy(&f, &word, sizeof f);
-  return word == 1u || (std::isfinite(f) && f > 0.5f && f < 1.5f);
+  return (word & 0xffu) == 1u || (std::isfinite(f) && f > 0.5f && f < 1.5f);
 }
 
 // Output side of the same switch: normalize the model's own loudness (GetLoudness(), dB) to a common target so
@@ -1377,7 +1380,10 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
   float out_gain = fx_curve ? trim_gain_fx(level_raw) : kl.db_trim ? trim_gain_db(level_raw) : trim_gain(level_raw);
   // dsp[0] is non-null whenever a real model is active (see silent_active below); the model is only swapped while
   // faded out / muted, so reading its metadata here is safe.
-  if (s.active_index.load(std::memory_order_relaxed) >= 0 && hilo_is_on(this_, kl.hilo))
+  const bool cal_on = hilo_is_on(this_, kl.hilo);
+  if (kl.db_trim && static_cast<int>(cal_on) != s.cal_state.exchange(static_cast<int>(cal_on), std::memory_order_relaxed))
+    std::fprintf(stderr, "[nam_eng] %p calibration %s\n", this_, cal_on ? "ON (Gain High)" : "off (Gain Low)");
+  if (s.active_index.load(std::memory_order_relaxed) >= 0 && cal_on)
   {
     in_gain *= calibration_gain(s.dsp[0].get());
     out_gain *= calibration_output_gain(s.dsp[0].get());
