@@ -27,6 +27,8 @@ set(NAM_BLOBS_GENERATED_SOURCES
   ${NAM_BLOBS_GENERATED_DIR}/blob_nam_hook.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_nam_preload.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_trampoline_gonk.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal_usb_sh.c
 )
 add_custom_command(
   OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_nam_hook.c
@@ -53,14 +55,35 @@ add_custom_command(
   VERBATIM
 )
 
+# Footswitch page-turner mod: the on-device daemon (cross-compiled blob) and
+# its gadget helper script (a plain source file, embedded verbatim).
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/blobs/pagepedal.bin
+          ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal.c g_pagepedal_bin
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/blobs/pagepedal.bin
+  COMMENT "Embedding pagepedal.bin as a C byte array"
+  VERBATIM
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal_usb_sh.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/pagepedal-usb.sh
+          ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal_usb_sh.c g_pagepedal_usb_sh
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/pagepedal-usb.sh
+  COMMENT "Embedding pagepedal-usb.sh as a C byte array"
+  VERBATIM
+)
+
 add_library(nam_gui_core STATIC
   core/model_targets.c
   core/fit_image.c
   core/elf_patch.c
+  core/spy_patch.c
   core/qml_patch.c
   core/ext4_image.c
   core/xz_codec.c
   core/launcher_script.c
+  core/page_pedal.c
   core/patch_pipeline.c
   core/http_download.c
   core/zip_reader.c
@@ -209,6 +232,7 @@ file(GLOB NAM_HOOK_SOURCES
   ${CMAKE_SOURCE_DIR}/patch/nam_hook.cpp
   ${CMAKE_SOURCE_DIR}/patch/nam_preload.cpp
   ${CMAKE_SOURCE_DIR}/patch/trampoline_gonk.S
+  ${CMAKE_SOURCE_DIR}/patch/pagepedal.c
 )
 file(GLOB_RECURSE NAM_CORE_SOURCES
   ${CMAKE_SOURCE_DIR}/nam_core/NAM/*.cpp
@@ -218,6 +242,7 @@ set(NAM_BLOBS
   ${CMAKE_SOURCE_DIR}/blobs/libnam_hook.so
   ${CMAKE_SOURCE_DIR}/blobs/libnam_preload.so
   ${CMAKE_SOURCE_DIR}/blobs/trampoline_gonk.bin
+  ${CMAKE_SOURCE_DIR}/blobs/pagepedal.bin
 )
 add_custom_command(
   OUTPUT ${NAM_BLOBS}
@@ -239,6 +264,10 @@ add_dependencies(gui-core-cli nam_gui_blobs)
 # dependency at all, so it doesn't need nam_gui_blobs.
 add_executable(nam-library-cli tools/nam_library_cli.c)
 target_link_libraries(nam-library-cli PRIVATE nam_gui_core)
+
+# Debug-only ModFac_construct spy image tool (core/spy_patch.c); not shipped.
+add_executable(modfac-spy-cli tools/modfac_spy_cli.c)
+target_link_libraries(modfac-spy-cli PRIVATE nam_gui_core)
 
 # Milestone 3: Nuklear (public domain, vendored header) + SDL2 GUI wrapping
 # nam_gui_core. Linux/simplest-output-path only for now (no .app/.exe

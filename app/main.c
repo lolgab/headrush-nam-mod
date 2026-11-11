@@ -167,6 +167,7 @@ typedef struct
   SDL_mutex* mutex;
   AppState state;
   int selected_model;
+  int enable_page_pedal; /* footswitch page-turner mod (Pedalboard only) -- int because nk_checkbox wants int* */
   bool enable_v2_hijack; /* false = 2 instances (Anxiety OD only), true = up to 4 (also Anxiety OD V2) */
   char log_lines[MAX_LOG_LINES][256];
   int log_count;
@@ -364,9 +365,11 @@ static int worker_main(void* data)
 
   int model_index;
   bool enable_v2_hijack;
+  bool enable_page_pedal;
   SDL_LockMutex(shared->mutex);
   model_index = shared->selected_model;
   enable_v2_hijack = shared->enable_v2_hijack;
+  enable_page_pedal = shared->enable_page_pedal != 0;
   shared->downloading = true;
   SDL_UnlockMutex(shared->mutex);
 
@@ -493,8 +496,8 @@ static int worker_main(void* data)
 
   uint8_t* out_data;
   size_t out_len;
-  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, enable_v2_hijack, workdir, progress_to_log, shared,
-                          &out_data, &out_len, err, sizeof(err));
+  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, enable_v2_hijack, enable_page_pedal, false,
+                          workdir, progress_to_log, shared, &out_data, &out_len, err, sizeof(err));
   free(stock_img);
 
   if (!ok)
@@ -875,6 +878,15 @@ int main(int argc, char** argv)
           int four = shared.enable_v2_hijack;
           if (nk_option_label(ctx, "Up to 4 instances (also hijacks Anxiety OD V2)", four) && !four)
             shared.enable_v2_hijack = true;
+        }
+
+        nk_layout_row_dynamic(ctx, 30, 1);
+        if (strcmp(NAM_MODEL_TARGETS[shared.selected_model].name, "pedalboard") == 0)
+          nk_checkbox_label(ctx, "Footswitch page-turner (FS5/FS11 -> USB Page Down/Up)", &shared.enable_page_pedal);
+        else
+        {
+          shared.enable_page_pedal = 0;
+          nk_label(ctx, "Footswitch page-turner: Pedalboard only", NK_TEXT_LEFT);
         }
 
         nk_layout_row_dynamic(ctx, 40, 1);

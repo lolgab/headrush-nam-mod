@@ -76,7 +76,9 @@ static bool sb_append_str(StrBuf* sb, const char* s)
 }
 
 bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex,
-                                const char* hook_slot_v2_addr_hex, char** out, char* err, size_t err_size)
+                                const char* hook_slot_v2_addr_hex, const char* hook_slot_eng_addr_hex,
+                                const char* eng_init_slot_hex, const char* eng_tab_hex, char** out, char* err,
+                                size_t err_size)
 {
   *out = NULL;
 
@@ -150,8 +152,27 @@ bool nam_build_launcher_script(const char* stock_script_text, const char* hook_s
   StrBuf final = {0};
   const char* hit = strstr(script.data, OLD_EXEC);
   ok = ok && sb_append(&final, script.data, (size_t)(hit - script.data));
-  ok = ok && sb_append_str(&final, "systemd-inhibit --what=handle-power-key env LD_PRELOAD=/usr/Evil/libnam_preload.so NAM_HOOK_SLOT_GONK_ADDR=");
-  ok = ok && sb_append_str(&final, hook_slot_addr_hex);
+  ok = ok && sb_append_str(&final, "systemd-inhibit --what=handle-power-key env LD_PRELOAD=/usr/Evil/libnam_preload.so");
+  if (hook_slot_addr_hex)
+  {
+    ok = ok && sb_append_str(&final, " NAM_HOOK_SLOT_GONK_ADDR=");
+    ok = ok && sb_append_str(&final, hook_slot_addr_hex);
+  }
+  if (hook_slot_eng_addr_hex)
+  {
+    ok = ok && sb_append_str(&final, " NAM_HOOK_SLOT_ENG_ADDR=");
+    ok = ok && sb_append_str(&final, hook_slot_eng_addr_hex);
+  }
+  if (eng_init_slot_hex)
+  {
+    ok = ok && sb_append_str(&final, " NAM_HOOK_SLOT_ENG_INIT_ADDR=");
+    ok = ok && sb_append_str(&final, eng_init_slot_hex);
+  }
+  if (eng_tab_hex)
+  {
+    ok = ok && sb_append_str(&final, " NAM_ENG_TAB_ADDR=");
+    ok = ok && sb_append_str(&final, eng_tab_hex);
+  }
   if (hook_slot_v2_addr_hex)
   {
     ok = ok && sb_append_str(&final, " NAM_HOOK_SLOT_GONK_V2_ADDR=");
@@ -168,5 +189,55 @@ bool nam_build_launcher_script(const char* stock_script_text, const char* hook_s
   }
 
   *out = final.data;
+  return true;
+}
+
+#define PAGE_PEDAL_START "# --- page pedal ---\n"
+#define PAGE_PEDAL_END "# --- end page pedal ---\n"
+
+static const char* const PAGE_PEDAL_BODY =
+  "# Footswitch page-turner: USB keyboard gadget + footswitch->Page Up/Down\n"
+  "# daemon (see docs/PAGE_PEDAL.md). Backgrounded and exit-0 so it can never\n"
+  "# delay or break Evil's own startup.\n"
+  "[ -x /usr/Evil/Scripts/pagepedal-usb.sh ] && /usr/Evil/Scripts/pagepedal-usb.sh boot >/dev/null 2>&1 &\n";
+
+bool nam_launcher_add_page_pedal(const char* script_text, char** out, char* err, size_t err_size)
+{
+  *out = NULL;
+  StrBuf block = {0};
+  bool ok = sb_append_str(&block, PAGE_PEDAL_START) && sb_append_str(&block, PAGE_PEDAL_BODY)
+            && sb_append_str(&block, PAGE_PEDAL_END);
+
+  StrBuf script = {0};
+  const char* start = strstr(script_text, PAGE_PEDAL_START);
+  const char* end = start ? strstr(start, PAGE_PEDAL_END) : NULL;
+  if (ok && start && end)
+  {
+    size_t block_end = (size_t)(end - script_text) + strlen(PAGE_PEDAL_END);
+    ok = sb_append(&script, script_text, (size_t)(start - script_text)) && sb_append(&script, block.data, block.len)
+         && sb_append_str(&script, script_text + block_end);
+  }
+  else if (ok)
+  {
+    const char* marker = strstr(script_text, "while [ 1 ]");
+    if (!marker)
+    {
+      set_err(err, err_size, "launcher script has no 'while [ 1 ]' marker to insert the page-pedal block before -- "
+                              "stock script layout changed, re-verify before proceeding.");
+      free(block.data);
+      free(script.data);
+      return false;
+    }
+    ok = sb_append(&script, script_text, (size_t)(marker - script_text)) && sb_append(&script, block.data, block.len)
+         && sb_append_str(&script, "\n") && sb_append_str(&script, marker);
+  }
+  free(block.data);
+  if (!ok)
+  {
+    set_err(err, err_size, "out of memory");
+    free(script.data);
+    return false;
+  }
+  *out = script.data;
   return true;
 }

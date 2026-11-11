@@ -34,7 +34,15 @@ device, but do this instead:
 | Drive | selects/scans `.nam` model files |
 | Tone | input trim |
 | Level | output trim |
-| Hi-Lo | doesn't do anything |
+| Hi-Lo | input calibration + output loudness normalization on/off (off by default) |
+
+With Hi-Lo on, the input is scaled by `interface_dBu - model_input_level_dBu` (the NAM plugin's rule), using the
+`input_level_dbu` stored in the `.nam` metadata; models without it are untouched. The interface level defaults to
+12.2 dBu (`NAM_CAL_DBU` overrides) and the boost/cut is capped at +-24 dB. Tone still trims on top. The output is also normalized: gain is `-18 dB - model_loudness_dB` (`loudness` in the
+`.nam` metadata; `NAM_CAL_LOUDNESS_DB` overrides the target, same ±24 dB cap, models without it untouched), with Level
+trim on top. **Unverified on
+hardware:** the Hi-Lo field offset (`0x55c` Anxiety OD, `0x57c` additive pedals, a guess one slot after Tone;
+`NAM_HILO_OFFSET` overrides) and the 12.2 dBu reference.
 
 The Model knob has a fixed 101 positions (0%-100%, one per whole percent).
 Each position selects one `.nam` file, in alphabetical order, starting at 0%:
@@ -204,6 +212,10 @@ firmware's own UI).
   `patch/case92_stub.S`, `patch/test_nam_naml_e2e.c` — the additive
   (non-hijacking) pedal design and its supporting dispatch-tracing tool.
   Not invoked by the build. See [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md).
+
+- `patch/pagepedal.c`, `patch/pagepedal-usb.sh`, `core/page_pedal.c` — the
+  optional footswitch page-turner (USB keyboard) mod. See
+  [`PAGE_PEDAL.md`](PAGE_PEDAL.md).
 
 See [`BUILDING.md`](BUILDING.md) for the GUI/CLI build itself (`core/`,
 `app/`, `tools/`, `scripts/`).

@@ -6,9 +6,10 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--instances 2|4] [--keep-work-dir]
+ *                      [--instances 2|4] [--additive [--rename-params]] [--page-pedal] [--keep-work-dir]
  */
 #include "patch_pipeline.h"
+#include "spy_patch.h"
 #include "tempdir.h"
 
 #include <errno.h>
@@ -67,7 +68,7 @@ static void print_progress(const char* message, void* user_data)
 int main(int argc, char** argv)
 {
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--instances 2|4] [--keep-work-dir]",
+    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--instances 2|4] [--additive] [--page-pedal] [--keep-work-dir]",
         argv[0]);
 
   const char* input_img = argv[1];
@@ -75,6 +76,8 @@ int main(int argc, char** argv)
   const char* model_name = NULL;
   bool keep_work_dir = false;
   int instances = 2;
+  bool page_pedal = false;
+  bool additive = false;
 
   for (int i = 3; i < argc; ++i)
   {
@@ -90,6 +93,12 @@ int main(int argc, char** argv)
       else
         die("--instances must be 2 or 4, got %s", v);
     }
+    else if (strcmp(argv[i], "--additive") == 0)
+      additive = true;
+    else if (strcmp(argv[i], "--rename-params") == 0)
+      nam_spy_set_rename_params(true); /* experimental: Model / OutVol / InVol knob names for the additive pedals */
+    else if (strcmp(argv[i], "--page-pedal") == 0)
+      page_pedal = true;
     else if (strcmp(argv[i], "--keep-work-dir") == 0)
       keep_work_dir = true;
     else
@@ -111,7 +120,7 @@ int main(int argc, char** argv)
   uint8_t* out_data;
   size_t out_len;
   char err[1024];
-  bool ok = nam_patch_pipeline(input_data, input_len, model_name, instances == 4, workdir, print_progress, NULL,
+  bool ok = nam_patch_pipeline(input_data, input_len, model_name, instances == 4, page_pedal, additive, workdir, print_progress, NULL,
                                 &out_data, &out_len, err, sizeof(err));
   free(input_data);
 
@@ -132,5 +141,7 @@ int main(int argc, char** argv)
     nam_remove_dir_recursive(workdir);
 
   printf("\nOK  Anxiety OD (v1)%s process() NAM hijack applied.\n", instances == 4 ? " + Anxiety OD V2" : "");
+  if (page_pedal)
+    printf("OK  Footswitch page-turner installed (FS5/FS11 -> USB Page Down/Up, see docs/PAGE_PEDAL.md).\n");
   return 0;
 }

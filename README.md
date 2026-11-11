@@ -98,6 +98,16 @@ blocks on a board, so by default that's 2 NAM instances max, and Anxiety OD
 addable up to twice) the same way, for up to 4 NAM instances total — at the
 cost of losing Anxiety OD V2's real sound board-wide too.
 
+## Footswitch page-turner (optional, Pedalboard only)
+
+Tick **Footswitch page-turner** in the installer (or pass `--page-pedal` to
+the CLI) and the Pedalboard also acts as a USB keyboard for the computer it's
+plugged into: the 5th footswitch from the left, **upper** row = **Page Down**,
+**lower** row = **Page Up**, for turning pages in a PDF. Leave those two
+switches unassigned in the HeadRush UI. The upper/lower numbering is a guess
+until confirmed on hardware, and there's a built-in calibration mode — see
+[docs/PAGE_PEDAL.md](docs/PAGE_PEDAL.md).
+
 ## Supported models
 
 | Device | Status |

@@ -29,11 +29,20 @@ typedef void (*NamProgressFn)(const char* message, void* user_data);
  * vtable slot, see model_targets.h's v2_engine_vtable_vaddr/
  * v2_orig_process_fn).
  *
+ * `additive_nam` (Pedalboard only) replaces the Anxiety OD hijack altogether: it adds two real "NAM A" / "NAM B"
+ * pedals to the Distortion list (2 instances each, 4 in all), each with its own audio engine running NAM, see
+ * spy_patch.h. enable_v2_hijack is ignored then.
+ *
+ * `enable_page_pedal` additionally installs the footswitch page-turner mod
+ * (Pedalboard only): FS5/FS11 become USB-keyboard Page Down/Up, see
+ * docs/PAGE_PEDAL.md and core/page_pedal.h.
+ *
  * On success, *out_img_data is a malloc'd buffer (caller frees it)
  * containing the patched Update.img, and returns true. On failure, writes
  * a reason into err and returns false. */
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         bool enable_v2_hijack, const char* workdir, NamProgressFn progress, void* progress_user_data,
-                         uint8_t** out_img_data, size_t* out_img_len, char* err, size_t err_size);
+                         bool enable_v2_hijack, bool enable_page_pedal, bool additive_nam, const char* workdir,
+                         NamProgressFn progress, void* progress_user_data, uint8_t** out_img_data,
+                         size_t* out_img_len, char* err, size_t err_size);
 
 #endif

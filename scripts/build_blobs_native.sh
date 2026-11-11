@@ -20,6 +20,7 @@ set -euxo pipefail
 NAM_CORE=nam_core
 WORK=blobs
 CXX=arm-buildroot-linux-gnueabihf-g++
+CC=arm-buildroot-linux-gnueabihf-gcc
 AS=arm-buildroot-linux-gnueabihf-as
 OBJCOPY=arm-buildroot-linux-gnueabihf-objcopy
 STRIP=arm-buildroot-linux-gnueabihf-strip
@@ -39,8 +40,14 @@ mkdir -p "$WORK"
 "$AS" -mfpu=neon-vfpv4 -mfloat-abi=hard patch/trampoline_gonk.S -o "$WORK"/trampoline_gonk.o
 "$OBJCOPY" -O binary "$WORK"/trampoline_gonk.o "$WORK"/trampoline_gonk.bin
 
+# Footswitch page-turner daemon (plain C, kernel UAPI headers only -- no libasound)
+"$CC" -std=gnu11 -O2 -Wall -Wextra -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
+    patch/pagepedal.c -o "$WORK"/pagepedal.unstripped
+"$STRIP" --strip-unneeded -o "$WORK"/pagepedal.bin "$WORK"/pagepedal.unstripped
+rm -f "$WORK"/pagepedal.unstripped
+
 "$STRIP" --strip-unneeded -o "$WORK"/libnam_hook.so "$WORK"/libnam_hook.unstripped.so
 "$STRIP" --strip-unneeded -o "$WORK"/libnam_preload.so "$WORK"/libnam_preload.unstripped.so
 rm -f "$WORK"/libnam_hook.unstripped.so "$WORK"/libnam_preload.unstripped.so "$WORK"/trampoline_gonk.o
 
-echo "OK  wrote $WORK/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin}"
+echo "OK  wrote $WORK/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,pagepedal.bin}"

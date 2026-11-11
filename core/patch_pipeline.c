@@ -5,8 +5,10 @@
 #include "ext4_image.h"
 #include "fit_image.h"
 #include "launcher_script.h"
+#include "spy_patch.h"
 #include "model_targets.h"
 #include "nam_blobs_embedded.h"
+#include "page_pedal.h"
 #include "qml_patch.h"
 #include "xz_codec.h"
 
@@ -90,8 +92,9 @@ static bool write_whole_file(const char* path, const uint8_t* data, size_t len, 
 }
 
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         bool enable_v2_hijack, const char* workdir, NamProgressFn progress, void* progress_user_data,
-                         uint8_t** out_img_data, size_t* out_img_len, char* err, size_t err_size)
+                         bool enable_v2_hijack, bool enable_page_pedal, bool additive_nam, const char* workdir,
+                         NamProgressFn progress, void* progress_user_data, uint8_t** out_img_data, size_t* out_img_len,
+                         char* err, size_t err_size)
 {
   *out_img_data = NULL;
   *out_img_len = 0;
@@ -195,47 +198,106 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     goto cleanup;
   }
 
-  ElfPatchResult elf_result;
-  if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
-                                 &elf_result, err, err_size))
-    goto cleanup;
-  report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
-         elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
-
-  ElfPatchResult elf_result_v2;
+  ElfPatchResult elf_result = {0};
+  ElfPatchResult elf_result_v2 = {0};
   bool has_v2_hijack = false;
-  if (enable_v2_hijack)
+  uint32_t eng_hook_slot = 0, eng_init_slot = 0, eng_tab = 0;
+  if (additive_nam)
   {
-    if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
-                                   target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+    if (strcmp(target->name, "pedalboard") != 0)
+    {
+      set_err(err, err_size, "the additive NAM pedals are Pedalboard-only so far; selected target is %s", target->name);
       goto cleanup;
-    has_v2_hijack = true;
-    report(progress, progress_user_data, "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
-           elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
-  }
-
-  if (target->qml_rename_count > 0)
-  {
-    if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
+    }
+    /* the registry patch parks tables in the zero slack after the R+W segment, which is the very end of the file */
+    uint8_t* grown = (uint8_t*)realloc(evil_data, evil_len + 4096);
+    if (!grown)
+    {
+      set_err(err, err_size, "out of memory growing Evil");
       goto cleanup;
-    report(progress, progress_user_data, "OK  QML knob labels relabeled");
+    }
+    memset(grown + evil_len, 0, 4096);
+    evil_data = grown;
+    evil_len += 4096;
+    const NamPair pairs[2] = {{"NAM A", "NAM A", NAM_ENGINE_TYPE, 0}, {"NAM B", "NAM B", NAM_ENGINE_TYPE, 0}};
+    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 2, err, err_size)
+        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 2, &eng_init_slot, &eng_tab, err, err_size)
+        || !nam_elf_patch_engine_class(evil_data, evil_len, 4, eng_tab, &eng_hook_slot, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data,
+           "OK  additive NAM pedals registered: \"NAM A\" and \"NAM B\" (2 instances each), engine hook_slot @ 0x%x",
+           eng_hook_slot);
   }
   else
   {
-    report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
-           target->name);
+    if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
+                                   &elf_result, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
+           elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
+
+    if (enable_v2_hijack)
+    {
+      if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
+                                     target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+        goto cleanup;
+      has_v2_hijack = true;
+      report(progress, progress_user_data, "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
+             elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
+    }
+
+    if (target->qml_rename_count > 0)
+    {
+      if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
+        goto cleanup;
+      report(progress, progress_user_data, "OK  QML knob labels relabeled");
+    }
+    else
+    {
+      report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
+             target->name);
+    }
+  }
+
+  if (enable_page_pedal && strcmp(target->name, "pedalboard") != 0)
+  {
+    set_err(err, err_size,
+            "the footswitch page-turner mod is Pedalboard-only (its footswitch->note mapping is the Pedalboard's "
+            "12-switch panel); selected target is %s",
+            target->name);
+    goto cleanup;
   }
 
   char hook_slot_hex[32];
   snprintf(hook_slot_hex, sizeof(hook_slot_hex), "0x%x", elf_result.hook_slot_addr);
+  char hook_slot_eng_hex[32];
+  snprintf(hook_slot_eng_hex, sizeof(hook_slot_eng_hex), "0x%x", eng_hook_slot);
+  char eng_init_hex[32], eng_tab_hex[32];
+  snprintf(eng_init_hex, sizeof(eng_init_hex), "0x%x", eng_init_slot);
+  snprintf(eng_tab_hex, sizeof(eng_tab_hex), "0x%x", eng_tab);
   char hook_slot_v2_hex[32];
   if (has_v2_hijack)
     snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
-  if (!nam_build_launcher_script(script_data, hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL, &new_script,
+  if (!nam_build_launcher_script(script_data, additive_nam ? NULL : hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL,
+                                  additive_nam ? hook_slot_eng_hex : NULL, additive_nam ? eng_init_hex : NULL,
+                                  additive_nam ? eng_tab_hex : NULL, &new_script,
                                   err, err_size))
     goto cleanup;
   free(script_data);
   script_data = NULL;
+
+  if (enable_page_pedal)
+  {
+    char* with_pp = NULL;
+    if (!nam_launcher_add_page_pedal(new_script, &with_pp, err, err_size))
+      goto cleanup;
+    free(new_script);
+    new_script = with_pp;
+    if (!nam_page_pedal_install(img, g_pagepedal_bin, (size_t)g_pagepedal_bin_len, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data,
+           "OK  page-turner installed: /usr/Evil/pagepedal, pagepedal-usb.sh, USB mode scripts patched");
+  }
 
   if (!nam_ext4_inject(img, "/usr/Evil/Evil", evil_data, evil_len, 0755, err, err_size))
     goto cleanup;
