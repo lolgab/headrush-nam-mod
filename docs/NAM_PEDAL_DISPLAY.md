@@ -1,8 +1,8 @@
 # NAM pedal display: dB faders and the Drive model readout
 
 Notes from reverse engineering how the HeadRush Pedalboard 2.7 UI shows a
-pedal's knob values, and how the additive NAM pedals (NAM A / NAM B, two
-instances each) use it. Everything here was learned on real hardware
+pedal's knob values, and how the additive NAM pedals (**NAM** and
+**NAM 2**, one pair) use it. Everything here was learned on real hardware
 (firmware 2.7 `Evil`, ARM32, non-PIE Qt/QML) unless marked *unverified*.
 
 Code: `patch/nam_hook.cpp` (the "display" section at the end of the file,
@@ -29,7 +29,7 @@ under `/Engine/MixerCtrl2/<pedal>/<param>`.
 prop            vtable 0x2b96734 (all MixerCtrl props)
   +0x2c  cb     control block; its vtable tells float props (0x2b99d40)
                 from enum props (0x2b98fb4)
-  +0x30  std::string { ptr, len }   the path, e.g. "/Engine/MixerCtrl/NAM A/Drive"
+  +0x30  std::string { ptr, len }   the path, e.g. "/Engine/MixerCtrl/NAM/Drive"
 cb  +0x20  -> desc  (translator / descriptor)
 desc (0x58 bytes for float params)
   +0x00  use count (0 idle, ~6 while the editor holds it)
@@ -106,7 +106,7 @@ a slightly moved knob shows number k but plays or names model k+-1.
 ### Pairing engines with pedal instances
 
 The slow, fragile part of the first versions. The module only knows the pedal
-*type* ("NAM A"), not which instance it is; instances were paired by engine
+*type* ("NAM"), not which instance it is; instances were paired by engine
 creation order, and a module lookup by heap sweep took seconds and failed for
 new pedals ("adding pedal n updated pedal n-1"). The props keep their current
 value at `desc+0x18`, so none of it is needed any more: each Drive prop is
@@ -197,7 +197,8 @@ file mapping, printed when the count changes).
 running) builds `blobs/libnam_hook.so`, `libnam_preload.so` and the
 trampolines. For a flashable image:
 `cd build && make gui-core-cli`, then
-`./build/gui-core-cli <base Update.img> out.img --model pedalboard --additive`,
+`./build/gui-core-cli <base Update.img> out.img --model pedalboard` (the NAM pedals are
+the Pedalboard default; `--anxiety-hijack` adds the legacy hijack),
 copy the image into a `ditto --noextattr --norsrc --noqtn` copy of the base
 `.app` and `codesign --force --deep --sign -` it (a plain `cp -R` breaks the
 signature and the app reports "damaged").

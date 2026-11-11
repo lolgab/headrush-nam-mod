@@ -1749,8 +1749,8 @@ struct EngTab
 
 struct Target
 {
-  std::string name;                  // "NAM A 2"
-  std::string path;                  // "NAM A 2/"
+  std::string name;                  // "NAM 2"
+  std::string path;                  // "NAM 2/"
   uintptr_t level[2] = {0, 0}, tone[2] = {0, 0}, drive[2] = {0, 0}; // desc objects, per mixer
 };
 
@@ -1873,7 +1873,7 @@ bool set_desc_index(uintptr_t desc, const std::vector<std::string>& names)
   return true;
 }
 
-// The pedals' props are MixerCtrl property objects: +0x30 std::string{ptr,len} path ("/Engine/MixerCtrl/NAM A/Level",
+// The pedals' props are MixerCtrl property objects: +0x30 std::string{ptr,len} path ("/Engine/MixerCtrl/NAM/Level",
 // also .../MixerCtrl2/...), +0x2c shared-ptr control block whose +0x20 is the translator desc. They are found by
 // sweeping the heap for the path text and then for the pointers to it (what the core-dump scripts did).
 struct HeapRegion
@@ -2045,7 +2045,7 @@ bool desc_sane(uintptr_t desc, uint32_t want_first_word)
 struct Binding
 {
   enum Kind { Level, Tone, Drive, DonorReturn, DonorSend } kind;
-  std::string pedal; // "NAM A 2", empty for donors
+  std::string pedal; // "NAM 2", empty for donors
   uintptr_t prop, desc;
 };
 
@@ -2154,10 +2154,8 @@ void display_watcher()
         {
           char nm[64] = {};
           safe_read(t.name, nm, 63);
-          // (the experimental --rename-params build calls them OutVol / InVol / Model)
           for (const auto& pr : {std::pair<const char*, Binding::Kind>{"Level", Binding::Level},
-                                 {"Tone", Binding::Tone}, {"Drive", Binding::Drive},
-                                 {"OutVol", Binding::Level}, {"InVol", Binding::Tone}, {"Model", Binding::Drive}})
+                                 {"Tone", Binding::Tone}, {"Drive", Binding::Drive}})
           {
             texts.push_back(std::string(mix) + nm + "/" + pr.first);
             proto.push_back({pr.second, nm, 0, 0});

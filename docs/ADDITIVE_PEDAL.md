@@ -1,10 +1,14 @@
-# The additive NAM pedals (NAM A / NAM B)
+# The additive NAM pedals (NAM / NAM 2)
 
-A genuinely new pair of pedals, **NAM A** and **NAM B** (two instances each,
-four NAM instances in total), added to the Pedalboard 2.7 firmware without
-sacrificing any stock pedal. They appear in the *Distortion* list, behave like
-any other pedal (add, move, bypass, save a rig) and run Neural Amp Modeler
-audio. Confirmed on real hardware; see "Status" for what is still open.
+A genuinely new pair of pedals, **NAM** and **NAM 2** (one registry pair: the
+firmware builds every pedal as "X" and "X 2"), added to the Pedalboard 2.7
+firmware without sacrificing any stock pedal. They appear in the *Distortion*
+list, behave like any other pedal (add, move, bypass, save a rig) and run
+Neural Amp Modeler audio. This is what `gui-core-cli` and the installer do by
+default on the Pedalboard; the Anxiety OD hijack is the opt-in alternative
+(`--anxiety-hijack`, "Also make Anxiety OD run NAM"), and the two can be
+installed together. Confirmed on real hardware as far as the "Status" table
+says; see there.
 
 This replaces the earlier version of this document, which described a static
 design (a new `ModFac_construct` case plus `patch_namloader.py`) that could
@@ -41,7 +45,8 @@ stock ones.
    pedals *by name* from literal lists built by a static initializer
    (`0x66288`): a `std::map<category, vector<string>>` (Distortion call site
    `0x665ac`, count `0x12`). A hook there rebuilds the array with the new
-   names appended, so "NAM A" / "NAM B" appear at the end of Distortion. (The
+   names appended, so "NAM" appears at the end of Distortion (its "NAM 2" twin is
+   made by adding it again). (The
    hook must initialize the destination string itself: `0x5b48e0` does not
    and crashes in libc otherwise.)
 3. **Second instance logic.** Picker index `s` maps to ids `2s-1` / `2s` for
@@ -50,8 +55,10 @@ stock ones.
    that function (`0x3cdd10`, `0x3cddd8`, `0x3cdddc`) are bumped so the new
    pairs get stock pair behavior. A single entry owning four ids was tried
    (v22) and abandoned: the picker row greys out after two uses and the logic
-   that does it was never found. Two entries with two instances each (v23)
-   work.
+   that does it was never found. The shipped design is therefore one pair
+   (two instances). Two pairs, "NAM A" / "NAM B" for four instances, also
+   worked (v23-v28) and are still supported by the registry code
+   (`NAM_MAX_PAIRS`); the installer ships the single pair.
 4. **Property nodes.** A pedal needs nodes in the state tree
    (`/Engine/Patch/...`, `/Engine/MixerCtrl/<name>/<param>`). Stock code
    creates them in code (`0x5f88a8` via `0x594ab4` / `0x5938bc`), so ids with no
@@ -83,12 +90,14 @@ stock ones.
 | Piece | State |
 |---|---|
 | Registry, picker entry, two instances per pedal, rig save, FX-Loop | confirmed on hardware (v21, v23) |
-| NAM A + NAM B = four instances | confirmed (v23) |
+| two pairs (four instances), as the earlier NAM A / NAM B build | confirmed (v23) |
+| the shipped single pair "NAM" / "NAM 2" (one pair, `ids = 2` engine class) | built; **not yet flashed on hardware** |
+| combined with the Anxiety OD hijack | built; **not yet flashed on hardware** |
 | NAM audio, level / input trim | confirmed (v25, v26) |
 | dB faders on Level / Tone | confirmed (v27/v28 and later hot-deployed libs) |
 | Drive readout (number + file name) | hot-deployed only; consistency of the last build unconfirmed |
 | Captions DRIVE / LEVEL / TONE | cannot be changed (see NAM_PEDAL_DISPLAY.md) |
-| Pedal art | missing: `img/NAM A.png` falls back to `img/Other.png` |
+| Pedal art | missing: `img/NAM.png` falls back to `img/Other.png` |
 | Patch committed / in the GUI | not committed; CLI only (`--additive`) |
 
 ## Findings and recipes
@@ -134,6 +143,8 @@ disk. Edits to them are ignored on hardware.
   `v6` picker hook without string initialization: each taught something but
   none was the fix.
 * Single four-instance entry (see above).
+* `--rename-params` (Model / OutVol / InVol caption experiment): removed after it
+  failed on hardware.
 * QML edits, renamed parameter names, enum Gain: see NAM_PEDAL_DISPLAY.md.
 
 ## Open items
@@ -143,7 +154,8 @@ disk. Edits to them are ignored on hardware.
 * The patch is not in the shipped GUI pipeline's defaults and not committed.
 * Art and captions for the pedal; a generalization to N pairs (the registry
   constants derive from the pair count, but the node-registration hooks still
-  assume two pairs, ids 167..170, and seven parameters).
+  assume the ids 167.. of the pairs they are given and seven parameters (Glorious
+  Drive's), which is fine for up to `NAM_MAX_PAIRS`).
 * Debug logging (`[nam_disp]`, `[nam_eng]`) should be trimmed before release.
 
 ## History: the first design (static, never applied)

@@ -6,10 +6,14 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--instances 2|4] [--additive [--rename-params]] [--page-pedal] [--keep-work-dir]
+ *                      [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal]
+ *                      [--keep-work-dir]
+ *
+ * Pedalboard default: adds the "NAM" / "NAM 2" pedals. --anxiety-hijack additionally (opt-in) makes Anxiety OD run
+ * NAM (--instances 4 also hijacks Anxiety OD V2); --no-nam-pedals leaves out the new pedals (hijack only). MX5 and
+ * Gigboard have no NAM pedals yet and always get the Anxiety OD hijack.
  */
 #include "patch_pipeline.h"
-#include "spy_patch.h"
 #include "tempdir.h"
 
 #include <errno.h>
@@ -67,9 +71,11 @@ static void print_progress(const char* message, void* user_data)
 
 int main(int argc, char** argv)
 {
+  const char* usage =
+      "usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--anxiety-hijack [--instances 2|4]] "
+      "[--no-nam-pedals] [--page-pedal] [--keep-work-dir]";
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--instances 2|4] [--additive] [--page-pedal] [--keep-work-dir]",
-        argv[0]);
+    die(usage, argv[0]);
 
   const char* input_img = argv[1];
   const char* output_img = argv[2];
@@ -77,7 +83,8 @@ int main(int argc, char** argv)
   bool keep_work_dir = false;
   int instances = 2;
   bool page_pedal = false;
-  bool additive = false;
+  bool anxiety_hijack = false;
+  bool no_nam_pedals = false;
 
   for (int i = 3; i < argc; ++i)
   {
@@ -89,14 +96,17 @@ int main(int argc, char** argv)
       if (strcmp(v, "2") == 0)
         instances = 2;
       else if (strcmp(v, "4") == 0)
+      {
         instances = 4;
+        anxiety_hijack = true; /* the V2 hijack only exists on top of the Anxiety OD one */
+      }
       else
         die("--instances must be 2 or 4, got %s", v);
     }
-    else if (strcmp(argv[i], "--additive") == 0)
-      additive = true;
-    else if (strcmp(argv[i], "--rename-params") == 0)
-      nam_spy_set_rename_params(true); /* experimental: Model / OutVol / InVol knob names for the additive pedals */
+    else if (strcmp(argv[i], "--anxiety-hijack") == 0)
+      anxiety_hijack = true;
+    else if (strcmp(argv[i], "--no-nam-pedals") == 0)
+      no_nam_pedals = true;
     else if (strcmp(argv[i], "--page-pedal") == 0)
       page_pedal = true;
     else if (strcmp(argv[i], "--keep-work-dir") == 0)
@@ -107,6 +117,15 @@ int main(int argc, char** argv)
 
   if (!model_name)
     die("--model is required (pedalboard|mx5|gigboard) -- no default target");
+
+  /* only the Pedalboard has the NAM pedals; the other models keep the original (Anxiety OD) design */
+  NamPatchOptions opts = {0};
+  opts.nam_pedals = strcmp(model_name, "pedalboard") == 0 && !no_nam_pedals;
+  opts.anxiety_hijack = anxiety_hijack || !opts.nam_pedals;
+  opts.anxiety_v2 = instances == 4;
+  opts.page_pedal = page_pedal;
+  if (instances == 4 && !opts.anxiety_hijack)
+    die("--instances 4 needs the Anxiety OD hijack");
 
   char workdir[NAM_TEMPDIR_MAX_PATH];
   char tempdir_err[256];
@@ -120,8 +139,8 @@ int main(int argc, char** argv)
   uint8_t* out_data;
   size_t out_len;
   char err[1024];
-  bool ok = nam_patch_pipeline(input_data, input_len, model_name, instances == 4, page_pedal, additive, workdir, print_progress, NULL,
-                                &out_data, &out_len, err, sizeof(err));
+  bool ok = nam_patch_pipeline(input_data, input_len, model_name, &opts, workdir, print_progress, NULL, &out_data,
+                                &out_len, err, sizeof(err));
   free(input_data);
 
   if (!ok)
@@ -140,7 +159,11 @@ int main(int argc, char** argv)
   else
     nam_remove_dir_recursive(workdir);
 
-  printf("\nOK  Anxiety OD (v1)%s process() NAM hijack applied.\n", instances == 4 ? " + Anxiety OD V2" : "");
+  if (opts.nam_pedals)
+    printf("\nOK  NAM pedals added (\"NAM\" and \"NAM 2\" in the Distortion list).\n");
+  if (opts.anxiety_hijack)
+    printf("%sOK  Anxiety OD (v1)%s process() NAM hijack applied.\n", opts.nam_pedals ? "" : "\n",
+           opts.anxiety_v2 ? " + Anxiety OD V2" : "");
   if (page_pedal)
     printf("OK  Footswitch page-turner installed (FS5/FS11 -> USB Page Down/Up, see docs/PAGE_PEDAL.md).\n");
   return 0;

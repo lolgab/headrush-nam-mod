@@ -1,5 +1,12 @@
 # Technical design: the Anxiety OD hijack
 
+> This is the **opt-in, older** design (the installer's "Also make Anxiety OD
+> run NAM" option; the only mode on MX5 and Gigboard). The default on the
+> Pedalboard is two new pedals, **NAM** and **NAM 2**, that replace nothing:
+> see [ADDITIVE_PEDAL.md](ADDITIVE_PEDAL.md) and
+> [NAM_PEDAL_DISPLAY.md](NAM_PEDAL_DISPLAY.md). Both can be installed together;
+> they patch different parts of `Evil` and share `libnam_hook.so`.
+
 Takes a stock HeadRush Pedalboard, MX5, or Gigboard firmware update file (`Update.img`)
 and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
 `process()` function, replacing its overdrive DSP with NAM inference. The
@@ -207,11 +214,15 @@ firmware's own UI).
 - `nam_core/` — [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
   (MIT license), fetched by `scripts/fetch_nam_core.sh` (not committed to
   this repo, not a git submodule).
+- `core/spy_patch.c`, `patch/engine_stub.S`, `patch/test_nam_eng.c`,
+  `tools/modfac_spy_cli.c` — the NAM pedals (registry, picker and node hooks,
+  own audio engine) and the observation tools used to find them. See
+  [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md).
 - `patch/patch_namloader.py`, `patch/patch_modfac_spy.py`,
   `patch/trampoline_naml.S`, `patch/trampoline_trim.S`,
-  `patch/case92_stub.S`, `patch/test_nam_naml_e2e.c` — the additive
-  (non-hijacking) pedal design and its supporting dispatch-tracing tool.
-  Not invoked by the build. See [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md).
+  `patch/case92_stub.S`, `patch/test_nam_naml_e2e.c` — the first, static
+  design for an additive pedal (never reachable). Kept as history; not
+  invoked by the build.
 
 - `patch/pagepedal.c`, `patch/pagepedal-usb.sh`, `core/page_pedal.c` — the
   optional footswitch page-turner (USB keyboard) mod. See

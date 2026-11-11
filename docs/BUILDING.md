@@ -98,12 +98,24 @@ the `blobs/` entry above.
 CLI (local dev/debugging tool only, not built or shipped by CI):
 
 ```sh
-build/gui-core-cli <stock Update.img> <out.img> --model pedalboard [--instances 2|4]
+build/gui-core-cli <stock Update.img> <out.img> --model pedalboard|mx5|gigboard \
+    [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal]
 ```
 
-`--instances 4` also hijacks Anxiety OD V2 for up to 4 NAM instances total
-(default: `2`, Anxiety OD v1 only) -- see docs/TECHNICAL.md's "Up to 4
-instances" section.
+Pedalboard default: adds the **NAM** / **NAM 2** pedals (see
+docs/ADDITIVE_PEDAL.md). `--anxiety-hijack` additionally makes Anxiety OD run
+NAM (the older, opt-in design for keeping existing pedalboards working);
+`--instances 4` also hijacks Anxiety OD V2 for up to 4 hijacked instances and
+implies `--anxiety-hijack` (docs/TECHNICAL.md's "Up to 4 instances" section).
+`--no-nam-pedals` leaves the new pedals out (hijack only). MX5 and Gigboard have
+no NAM pedals yet and always get the Anxiety OD hijack.
+
+The GUI caches the stock updater zip it downloads (`core/stock_cache.c`): one
+`<model>-<platform>.zip` plus a `.sha256` sidecar (hash and URL) per model in the
+per-user cache directory, reused only if the zip still hashes to the recorded
+value and the URL is unchanged. The hash is recorded at first download (trust on
+first use; there is no list of known-good official hashes). `NAM_NO_CACHE=1`
+bypasses it. The CLI takes the stock `Update.img` directly and does not use it.
 
 GUI -- can be run from anywhere, not just the repo root:
 

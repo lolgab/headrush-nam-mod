@@ -891,31 +891,6 @@ static const uint8_t k_node_hooks[616] = {
   0x00, 0x00, 0x00, 0x00,
 };
 
-static bool g_rename_params;
-void nam_spy_set_rename_params(bool on)
-{
-  g_rename_params = on;
-}
-
-/* file offset of a vaddr inside the plain R+W LOAD segment, or 0 */
-static uint32_t rw_off_of(const uint8_t* data, uint32_t vaddr)
-{
-  uint32_t e_phoff = rd32(data, 28);
-  uint16_t e_phentsize = (uint16_t)(data[42] | (data[43] << 8));
-  uint16_t e_phnum = (uint16_t)(data[44] | (data[45] << 8));
-  for (uint16_t i = 0; i < e_phnum; ++i)
-  {
-    size_t ph = (size_t)e_phoff + (size_t)i * e_phentsize;
-    if (rd32(data, ph) == PT_LOAD && rd32(data, ph + 24) == (PF_R | PF_W))
-    {
-      uint32_t p_off = rd32(data, ph + 4), p_vaddr = rd32(data, ph + 8), filesz = rd32(data, ph + 16);
-      if (vaddr >= p_vaddr && vaddr < p_vaddr + filesz)
-        return vaddr - p_vaddr + p_off;
-    }
-  }
-  return 0;
-}
-
 bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPair* pairs, uint32_t npairs,
                                      uint32_t* out_init_slot, uint32_t* out_eng_tab, char* err, size_t err_size)
 {
@@ -944,7 +919,7 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
   /* storages (writable) go in the R+W tail; the strings are read-only and fit the dead original name array, past the
    * entries the in-place category-table extension overwrites */
   static const char k_p1[] = "/Engine/MixerCtrl/", k_p2[] = "/Engine/MixerCtrl2/";
-  uint32_t str_bytes = (uint32_t)(sizeof(k_p1) + sizeof(k_p2) + 8) + (g_rename_params ? 24u : 0u);
+  uint32_t str_bytes = (uint32_t)(sizeof(k_p1) + sizeof(k_p2) + 8);
   for (uint32_t p = 0; p < npairs; ++p)
     str_bytes += nam_pair_instances(&pairs[p]) * (uint32_t)((strlen(pairs[p].name) + 8 + 3) & ~3u) * 2u;
   const uint32_t str_start = REG_NAMES_BASE + 4u * inst + 8u;
@@ -978,34 +953,6 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
   NODE_STR(k_p1, v_p1);
   NODE_STR(k_p2, v_p2);
   const uint32_t init_slot = r_vaddr + 12u * inst;
-  if (g_rename_params)
-  {
-    /* own copy of Glorious Drive's 7-entry parameter-name table (Drive Level Tone Gain Hi-Cut On Colour) with the first
-     * three renamed; hooks A and B pass the table through tab word 3 */
-    const uint32_t gd_tab = 0x33ca244u;
-    const uint32_t gd_off = rw_off_of(data, gd_tab);
-    uint32_t t_off, t_vaddr, v_m, v_o, v_i;
-    if (!gd_off || gd_off + 28 > data_len || !rw_tail_alloc(data, data_len, 28, &t_off, &t_vaddr, err, err_size))
-    {
-      if (!gd_off || gd_off + 28 > data_len)
-        set_err(err, err_size, "REFUSING: Glorious Drive parameter-name table not found in the R+W segment");
-      return false;
-    }
-    if (rd32(data, gd_off) != 0x15ad65cu /* "Drive" */ || rd32(data, gd_off + 4) != 0x15ad66cu /* "Level" */
-        || rd32(data, gd_off + 8) != 0x15ad664u /* "Tone" */)
-    {
-      set_err(err, err_size, "REFUSING: Glorious Drive parameter-name table has unexpected contents");
-      return false;
-    }
-    NODE_STR("Model", v_m);
-    NODE_STR("OutVol", v_o);
-    NODE_STR("InVol", v_i);
-    memcpy(data + t_off, data + gd_off, 28);
-    wr32(data, t_off, v_m);
-    wr32(data, t_off + 4, v_o);
-    wr32(data, t_off + 8, v_i);
-    wr32(data, tab + 12, t_vaddr);
-  }
   wr32(data, tab + 20, inst);
   wr32(data, tab + 32, init_slot);
   wr32(data, tab + 24, v_p1);

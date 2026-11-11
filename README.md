@@ -4,8 +4,10 @@ Reverse-engineered firmware mod for the HeadRush Pedalboard, MX5, and Gigboard, 
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
 
-**Status**: a real, working NAM pedal today, via a hijacked pedal slot,
-confirmed on real hardware — see below.
+**Status**: on the Pedalboard, two real **NAM** pedals (**NAM** and **NAM 2**)
+are added to the Distortion list, next to the stock pedals. On every model,
+the older design is still available as an opt-in: it makes **Anxiety OD** run
+NAM, so existing pedalboards that use it keep working. See below.
 
 ## Install
 
@@ -20,10 +22,13 @@ confirmed on real hardware — see below.
 
    Without these, `headrush-nam-gui` fails to launch with a
    `Library not loaded` error.
-2. Run it, pick your model (Pedalboard, MX5, or Gigboard), choose **2 instances**
-   or **up to 4 instances** (see "The pedal" below), and click **Install NAM
-   Mod** — it downloads the official HeadRush firmware updater and builds a
-   patched copy of it in the current directory.
+2. Run it, pick your model (Pedalboard, MX5, or Gigboard), and click **Install
+   NAM Mod** — it downloads the official HeadRush firmware updater and builds
+   a patched copy of it in the current directory. On the Pedalboard it adds the
+   NAM pedals by default; tick **Also make Anxiety OD run NAM** if you have
+   pedalboards that use Anxiety OD as the NAM engine and want to keep them
+   (see "The pedals" below). MX5 and Gigboard don't have the NAM pedals yet and
+   always use the Anxiety OD design.
 3. Put your device in firmware-update mode. See
    [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a
    walkthrough.
@@ -34,6 +39,14 @@ confirmed on real hardware — see below.
      updater (unsigned, so SmartScreen may warn about an unrecognized
      publisher — expected for any unofficial build).
 
+The installer keeps the official updater it downloaded (about 60 MB) in your
+user cache folder (macOS `~/Library/Caches/headrush-nam-mod`, Windows
+`%LOCALAPPDATA%\headrush-nam-mod\cache`, Linux `~/.cache/headrush-nam-mod`) and
+reuses it on the next run instead of downloading again. Its SHA-256 is recorded
+on the first download and checked every time; a file that no longer matches
+(truncated, corrupted, edited) is discarded and downloaded afresh. Delete the
+folder, or set `NAM_NO_CACHE=1`, to force a fresh download.
+
 Keep the unmodified updater the tool leaves alongside the patched one — you
 need it to recover if a flash goes wrong (see
 [docs/RECOVERY.md](docs/RECOVERY.md)).
@@ -43,26 +56,30 @@ need it to recover if a flash goes wrong (see
 Drop `.nam` files into their own **`/NAM`** folder on the device's USB drive
 (sibling to `Impulse Responses`, `Blocks`, `Rigs`, etc — create it yourself via
 the File Manager/USB transfer view if it doesn't exist yet). Files are sorted
-alphabetically and assigned one per whole percent of the Model knob's sweep,
-starting at 0% — name them with a 3-digit index prefix matching the knob
-percentage so the number on the file is the number on the knob:
+alphabetically; a file's position in that order is its model number. Name them
+with a 3-digit index prefix so the order is explicit:
 
 - `000 - First Model.nam`
 - `001 - Second Model.nam`
 - `002 - Third Model.nam`
 
-With 3 files as above, 0%-2% select them in order; the rest of the knob's
+**NAM pedals**: the **DRIVE** knob shows the model number `1..N` (N = number of
+files) and the file name under it, so `000 - First Model.nam` is model 1. Every
+file is reachable, and the knob always lands on a real file.
+
+**Anxiety OD option**: files are assigned one per whole percent of the Drive
+knob's sweep, starting at 0% — so the number in the file name is the number on
+the knob. With 3 files as above, 0%-2% select them in order; the rest of the
 sweep (3%-100%) is silence — no file is assigned there, so the pedal outputs
-nothing. This is deliberate: it keeps each file pinned to a fixed knob
-position regardless of how many other files are on the drive, instead of the
-position drifting every time you add or remove one.
+nothing. This is deliberate: it keeps each file pinned to a fixed knob position
+regardless of how many other files are on the drive.
 
 Reboot device after adding/changing files via USB — new models don't show up
 till restart.
 
 Keeping that numbering correct by hand gets tedious with a large library, and
-a stale/gapped prefix is actively misleading (see above: the number is only a
-mnemonic, the real position is always the file's alphabetical rank). The
+a stale/gapped prefix is actively misleading (the number is only a mnemonic,
+the real position is always the file's alphabetical rank). The
 GUI's **Prepare NAM Library** screen automates this: it finds the device's
 `/NAM` folder itself (probing mounted-drive locations for the current OS —
 no path to type in, and creating `/NAM` itself if the drive doesn't have one
@@ -71,16 +88,39 @@ already-correct files untouched), and can optionally generate one Anxiety OD
 `.block` preset per model — set into that model's `Drive` knob position —
 into `Blocks/ANXIETY OD` (created too, if missing) for direct browsing from
 the HeadRush's own block/preset picker instead of remembering percentages.
-If you installed the **up to 4 instances** mod option, a second checkbox
+That is only useful with the **Anxiety OD option**; the NAM pedals don't need
+it. If you installed the **up to 4** Anxiety OD option, a second checkbox
 generates the same set again as `Blocks/ANXIETY OD V2` blocks, for Anxiety OD
 V2's hijacked slot. Nothing is renamed or written until you review the
 preview and click Apply. A CLI (`nam-library-cli`) is also available for
 scripting the same operation (`--find-drives` to list detected drives,
 `--v2-blocks` to include the V2 set, or point it at an explicit folder).
 
-## The pedal
+## The pedals
 
-On the device, add the **Anxiety OD** pedal.
+### NAM and NAM 2 (Pedalboard)
+
+On the device, add **NAM** from the **Distortion** list, and **NAM 2** by
+adding it a second time (like any other pedal and its "2" twin). Nothing stock
+is replaced, so every other pedal and every saved pedalboard behaves as before.
+
+| Knob | Function | Display |
+|---|---|---|
+| **DRIVE** | selects the `.nam` model | model number `1..N` and the file name |
+| **TONE** | input volume | dB, same scale as the FX Loop SEND |
+| **LEVEL** | output volume | dB, same scale as the FX Loop RETURN |
+
+The knob captions can't be changed (they are looked up by name in the
+firmware); they stay DRIVE / TONE / LEVEL. Known quirks: the pedal shows
+percentages for a few seconds after the device boots; the name under the number
+can lag behind a fast knob turn until you stop or reopen the page. See
+[docs/NAM_PEDAL_DISPLAY.md](docs/NAM_PEDAL_DISPLAY.md).
+
+### Anxiety OD option (all models, opt-in)
+
+Tick **Also make Anxiety OD run NAM** in the installer (Pedalboard; MX5 and
+Gigboard always use it) if you have pedalboards that use Anxiety OD as the
+NAM engine and want to keep them. On the device, add the **Anxiety OD** pedal.
 
 | Knob | Function |
 |---|---|
@@ -89,14 +129,14 @@ On the device, add the **Anxiety OD** pedal.
 | **LEVEL** | output trim |
 
 This is a *hijack*: Anxiety OD loses its real overdrive function board-wide,
-on every instance.
+on every instance. The two options can be installed together on the Pedalboard.
 
 **2 instances vs up to 4**: the stock firmware allows up to 2 Anxiety OD
 blocks on a board, so by default that's 2 NAM instances max, and Anxiety OD
 **V2** is left untouched, still available with its original sound. Pick
-**up to 4 instances** in the installer to also hijack Anxiety OD V2 (also
-addable up to twice) the same way, for up to 4 NAM instances total — at the
-cost of losing Anxiety OD V2's real sound board-wide too.
+**up to 4 instances** to also hijack Anxiety OD V2 (also addable up to twice)
+the same way, for up to 4 hijacked NAM instances total — at the cost of losing
+Anxiety OD V2's real sound board-wide too.
 
 ## Footswitch page-turner (optional, Pedalboard only)
 
@@ -121,7 +161,11 @@ flashing another model's file will almost certainly brick the device.
 
 ## Gain staging
 
-TONE and LEVEL are both **unity at 50%**, then diverge:
+**NAM pedals**: TONE (input) and LEVEL (output) are dB faders from -60 dB to
++12 dB (0 dB = unity), the same scale and display as the FX Loop SEND/RETURN.
+The bottom of the travel is silence.
+
+**Anxiety OD option**: TONE and LEVEL are both **unity at 50%**, then diverge:
 
 - **0%-50%**: linear amplitude fade from true silence (0%) up to unity/0dB
   (50%) — a plain volume taper, not a dB curve.
@@ -144,12 +188,14 @@ TONE and LEVEL are both **unity at 50%**, then diverge:
 ## Documentation
 
 - [docs/RECOVERY.md](docs/RECOVERY.md) — what to do if a flash goes wrong.
-- [docs/TECHNICAL.md](docs/TECHNICAL.md) — how the hijack works under the
-  hood.
+- [docs/TECHNICAL.md](docs/TECHNICAL.md) — how the Anxiety OD hijack works
+  under the hood.
+- [docs/ADDITIVE_PEDAL.md](docs/ADDITIVE_PEDAL.md) — how the NAM pedals are
+  added to the firmware.
+- [docs/NAM_PEDAL_DISPLAY.md](docs/NAM_PEDAL_DISPLAY.md) — the dB faders and
+  the model readout, and what doesn't work.
 - [docs/BUILDING.md](docs/BUILDING.md) — building `headrush-nam-gui` from
   source.
-- [docs/ADDITIVE_PEDAL.md](docs/ADDITIVE_PEDAL.md) — research notes on an
-  unshipped, non-hijacking pedal design.
 
 ## Disclaimer
 

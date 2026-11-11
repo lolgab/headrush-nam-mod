@@ -86,6 +86,7 @@ add_library(nam_gui_core STATIC
   core/page_pedal.c
   core/patch_pipeline.c
   core/http_download.c
+  core/stock_cache.c
   core/zip_reader.c
   core/tempdir.c
   core/nam_library.c

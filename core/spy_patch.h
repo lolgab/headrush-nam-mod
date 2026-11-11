@@ -49,11 +49,6 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
  * skipped); libnam_preload.so fills it. *out_eng_tab: {count, 8 x {engine, &name QString}} the engine stub fills
  * (pass it to nam_elf_patch_engine_class). Both may be NULL. */
 
-/* Experimental: give the extra pedals their own copy of Glorious Drive's parameter-name table with Drive / Level / Tone
- * renamed to Model / OutVol / InVol (the editor's knob captions may follow). Call before
- * nam_elf_patch_node_registration; the property paths become /Engine/MixerCtrl/<pedal>/Model etc. */
-void nam_spy_set_rename_params(bool on);
-
 /* ModFac type the extra pedals must be built as to get their own audio engine (pass it as NamPair.type_idx). */
 #define NAM_ENGINE_TYPE 80u
 

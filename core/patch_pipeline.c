@@ -92,12 +92,21 @@ static bool write_whole_file(const char* path, const uint8_t* data, size_t len, 
 }
 
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         bool enable_v2_hijack, bool enable_page_pedal, bool additive_nam, const char* workdir,
-                         NamProgressFn progress, void* progress_user_data, uint8_t** out_img_data, size_t* out_img_len,
-                         char* err, size_t err_size)
+                         const NamPatchOptions* opts, const char* workdir, NamProgressFn progress,
+                         void* progress_user_data, uint8_t** out_img_data, size_t* out_img_len, char* err,
+                         size_t err_size)
 {
   *out_img_data = NULL;
   *out_img_len = 0;
+  const bool nam_pedals = opts->nam_pedals;
+  const bool anxiety_hijack = opts->anxiety_hijack;
+  const bool enable_v2_hijack = opts->anxiety_hijack && opts->anxiety_v2;
+  const bool enable_page_pedal = opts->page_pedal;
+  if (!nam_pedals && !anxiety_hijack)
+  {
+    set_err(err, err_size, "nothing to install: enable the NAM pedals and/or the Anxiety OD hijack");
+    return false;
+  }
 
   FitProps props = {0};
   FitProps verify_props = {0};
@@ -202,38 +211,20 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   ElfPatchResult elf_result_v2 = {0};
   bool has_v2_hijack = false;
   uint32_t eng_hook_slot = 0, eng_init_slot = 0, eng_tab = 0;
-  if (additive_nam)
+  if (nam_pedals && strcmp(target->name, "pedalboard") != 0)
   {
-    if (strcmp(target->name, "pedalboard") != 0)
-    {
-      set_err(err, err_size, "the additive NAM pedals are Pedalboard-only so far; selected target is %s", target->name);
-      goto cleanup;
-    }
-    /* the registry patch parks tables in the zero slack after the R+W segment, which is the very end of the file */
-    uint8_t* grown = (uint8_t*)realloc(evil_data, evil_len + 4096);
-    if (!grown)
-    {
-      set_err(err, err_size, "out of memory growing Evil");
-      goto cleanup;
-    }
-    memset(grown + evil_len, 0, 4096);
-    evil_data = grown;
-    evil_len += 4096;
-    const NamPair pairs[2] = {{"NAM A", "NAM A", NAM_ENGINE_TYPE, 0}, {"NAM B", "NAM B", NAM_ENGINE_TYPE, 0}};
-    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 2, err, err_size)
-        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 2, &eng_init_slot, &eng_tab, err, err_size)
-        || !nam_elf_patch_engine_class(evil_data, evil_len, 4, eng_tab, &eng_hook_slot, err, err_size))
-      goto cleanup;
-    report(progress, progress_user_data,
-           "OK  additive NAM pedals registered: \"NAM A\" and \"NAM B\" (2 instances each), engine hook_slot @ 0x%x",
-           eng_hook_slot);
+    set_err(err, err_size,
+            "the NAM pedals are Pedalboard-only so far; selected target is %s (use the Anxiety OD hijack there)",
+            target->name);
+    goto cleanup;
   }
-  else
+
+  if (anxiety_hijack)
   {
     if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
                                    &elf_result, err, err_size))
       goto cleanup;
-    report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
+    report(progress, progress_user_data, "OK  Anxiety OD hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
            elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
 
     if (enable_v2_hijack)
@@ -242,7 +233,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
                                      target->v2_orig_process_fn, &elf_result_v2, err, err_size))
         goto cleanup;
       has_v2_hijack = true;
-      report(progress, progress_user_data, "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
+      report(progress, progress_user_data, "OK  Anxiety OD V2 hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
              elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
     }
 
@@ -257,6 +248,28 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
       report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
              target->name);
     }
+  }
+
+  if (nam_pedals)
+  {
+    /* the registry patch parks tables in the zero slack after the R+W segment, which is the very end of the file */
+    uint8_t* grown = (uint8_t*)realloc(evil_data, evil_len + 4096);
+    if (!grown)
+    {
+      set_err(err, err_size, "out of memory growing Evil");
+      goto cleanup;
+    }
+    memset(grown + evil_len, 0, 4096);
+    evil_data = grown;
+    evil_len += 4096;
+    const NamPair pairs[1] = {{"NAM", "NAM", NAM_ENGINE_TYPE, 0}};
+    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 1, err, err_size)
+        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 1, &eng_init_slot, &eng_tab, err, err_size)
+        || !nam_elf_patch_engine_class(evil_data, evil_len, 2, eng_tab, &eng_hook_slot, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data,
+           "OK  NAM pedals registered: \"NAM\" and \"NAM 2\" in the Distortion list, engine hook_slot @ 0x%x",
+           eng_hook_slot);
   }
 
   if (enable_page_pedal && strcmp(target->name, "pedalboard") != 0)
@@ -278,10 +291,9 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   char hook_slot_v2_hex[32];
   if (has_v2_hijack)
     snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
-  if (!nam_build_launcher_script(script_data, additive_nam ? NULL : hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL,
-                                  additive_nam ? hook_slot_eng_hex : NULL, additive_nam ? eng_init_hex : NULL,
-                                  additive_nam ? eng_tab_hex : NULL, &new_script,
-                                  err, err_size))
+  if (!nam_build_launcher_script(script_data, anxiety_hijack ? hook_slot_hex : NULL, has_v2_hijack ? hook_slot_v2_hex : NULL,
+                                  nam_pedals ? hook_slot_eng_hex : NULL, nam_pedals ? eng_init_hex : NULL,
+                                  nam_pedals ? eng_tab_hex : NULL, &new_script, err, err_size))
     goto cleanup;
   free(script_data);
   script_data = NULL;
