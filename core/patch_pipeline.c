@@ -306,10 +306,14 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
       goto cleanup;
     free(new_script);
     new_script = with_pp;
-    if (!nam_page_pedal_install(img, g_pagepedal_bin, (size_t)g_pagepedal_bin_len, err, err_size))
+    const int page_down = opts->page_notes_set ? opts->page_down_note : NAM_PAGE_DOWN_NOTE_DEFAULT;
+    const int page_up = opts->page_notes_set ? opts->page_up_note : NAM_PAGE_UP_NOTE_DEFAULT;
+    if (!nam_page_pedal_install(img, g_pagepedal_bin, (size_t)g_pagepedal_bin_len, page_down, page_up, err, err_size))
       goto cleanup;
     report(progress, progress_user_data,
-           "OK  page-turner installed: /usr/Evil/pagepedal, pagepedal-usb.sh, USB mode scripts patched");
+           "OK  page-turner installed: /usr/Evil/pagepedal, pagepedal-usb.sh, USB mode scripts patched, switches FS%d (Page "
+           "Down) and FS%d (Page Up) coloured and labelled",
+           page_down + 1, page_up + 1);
   }
 
   if (!nam_ext4_inject(img, "/usr/Evil/Evil", evil_data, evil_len, 0755, err, err_size))

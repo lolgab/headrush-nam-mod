@@ -6,7 +6,7 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal]
+ *                      [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]]
  *                      [--keep-work-dir]
  *
  * Pedalboard default: adds the "NAM" and "NAM TWO" pedals (two instances each). --anxiety-hijack additionally (opt-in) makes Anxiety OD run
@@ -73,7 +73,7 @@ int main(int argc, char** argv)
 {
   const char* usage =
       "usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--anxiety-hijack [--instances 2|4]] "
-      "[--no-nam-pedals] [--page-pedal] [--keep-work-dir]";
+      "[--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]] [--keep-work-dir]";
   if (argc < 3)
     die(usage, argv[0]);
 
@@ -85,6 +85,7 @@ int main(int argc, char** argv)
   bool page_pedal = false;
   bool anxiety_hijack = false;
   bool no_nam_pedals = false;
+  int page_down_note = -1, page_up_note = -1; /* -1 = the default */
 
   for (int i = 3; i < argc; ++i)
   {
@@ -109,6 +110,10 @@ int main(int argc, char** argv)
       no_nam_pedals = true;
     else if (strcmp(argv[i], "--page-pedal") == 0)
       page_pedal = true;
+    else if (strcmp(argv[i], "--page-down-note") == 0 && i + 1 < argc)
+      page_down_note = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--page-up-note") == 0 && i + 1 < argc)
+      page_up_note = atoi(argv[++i]);
     else if (strcmp(argv[i], "--keep-work-dir") == 0)
       keep_work_dir = true;
     else
@@ -124,6 +129,14 @@ int main(int argc, char** argv)
   opts.anxiety_hijack = anxiety_hijack || !opts.nam_pedals;
   opts.anxiety_v2 = instances == 4;
   opts.page_pedal = page_pedal;
+  if (page_down_note >= 0 || page_up_note >= 0)
+  {
+    if (!page_pedal)
+      die("--page-down-note / --page-up-note need --page-pedal");
+    opts.page_notes_set = true;
+    opts.page_down_note = page_down_note >= 0 ? page_down_note : 10;
+    opts.page_up_note = page_up_note >= 0 ? page_up_note : 4;
+  }
   if (instances == 4 && !opts.anxiety_hijack)
     die("--instances 4 needs the Anxiety OD hijack");
 

@@ -31,6 +31,9 @@ typedef struct
   bool anxiety_hijack; /* legacy: Anxiety OD (v1) process() runs NAM */
   bool anxiety_v2;     /* with anxiety_hijack: also hijack Anxiety OD V2's separate process() slot */
   bool page_pedal;
+  bool page_notes_set; /* page-turner: use page_down_note / page_up_note instead of the defaults (FS11 / FS5) */
+  int page_down_note;  /* 0-based footswitch numbers (FS number - 1) */
+  int page_up_note;
 } NamPatchOptions;
 
 /* `workdir` must already exist (the caller creates and later removes it,

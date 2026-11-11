@@ -225,7 +225,127 @@ static bool patch_one(Ext4Image* img, const char* basename, char* err, size_t er
   return ok;
 }
 
-bool nam_page_pedal_install(Ext4Image* img, const uint8_t* daemon, size_t daemon_len, char* err, size_t err_size)
+#define ASSIGNMENTS_PATH "/usr/Evil/Assignments/M-Audio_Pass_Through_Assignments.qml"
+
+/* Text of the display override (see docs/PAGE_PEDAL.md, "Labels and colours"). The panel's LED colours and its 12
+ * 128x32 label strips are painted by this QML file, loaded from disk at runtime (unlike the UI's own QML, which is
+ * compiled into Evil), so a text patch is enough. Every anchor must occur exactly once in the stock file. */
+static const char QML_COLOR_ANCHOR[] =
+    "            onColor: dimmed ? Qt.darker(rootColour, darkerPerColor[colIdx]) : rootColour";
+static const char QML_SAFETEXT_ANCHOR[] = "                property string safeText: recentActivityPresent ? text : \"\"";
+static const char QML_DRAW_ANCHOR[] =
+    "                    font.pixelSize = 30\n"
+    "                    drawAbbreviatedTextInRect(0,0, 128, 31, Painter.AlignCenter, safeText);";
+
+bool nam_page_pedal_patch_assignments(const char* qml_text, int page_down_note, int page_up_note, char** out, char* err,
+                                      size_t err_size)
+{
+  *out = NULL;
+  if (page_down_note < 0 || page_down_note > 11 || page_up_note < 0 || page_up_note > 11 || page_down_note == page_up_note)
+  {
+    set_err(err, err_size, "page-turner notes must be two different footswitch notes 0..11 (got %d and %d)",
+            page_down_note, page_up_note);
+    return false;
+  }
+  if (strstr(qml_text, "pageDownNote"))
+  {
+    *out = strdup(qml_text); /* already patched */
+    if (!*out)
+    {
+      set_err(err, err_size, "out of memory");
+      return false;
+    }
+    return true;
+  }
+
+  char props[1400];
+  snprintf(props, sizeof(props),
+           "\tproperty bool recentActivityPresent: true\n"
+           "\n"
+           "\t// Footswitch page-turner (NAM mod): the two switches that send Page Down / Page Up get a fixed colour and a\n"
+           "\t// \"PAGE DOWN\" / \"PAGE UP\" label instead of what the rig assigns. Notes are the panel's 0-based switch numbers.\n"
+           "\tproperty int pageDownNote: %d\n"
+           "\tproperty int pageUpNote: %d\n"
+           "\tproperty AppProperty pageDownLed: App.getProperty(\"/GUI/LEDColourCtrl/LEDColour8\")  // blue\n"
+           "\tproperty AppProperty pageUpLed: App.getProperty(\"/GUI/LEDColourCtrl/LEDColour10\")   // white\n"
+           "\tproperty color pageDownColour: pageDownLed && pageDownLed.translator ? pageDownLed.translator.color : Qt.rgba(0, 0, 1, 1)\n"
+           "\tproperty color pageUpColour: pageUpLed && pageUpLed.translator ? pageUpLed.translator.color : Qt.rgba(1, 1, 1, 1)\n",
+           page_down_note, page_up_note);
+  /* the anchor is "\tproperty bool recentActivityPresent: true\n"; replace it with the same line plus the block */
+  static const char props_anchor[] = "\tproperty bool recentActivityPresent: true\n";
+  /* NOTE: a QML binding must stay on one line here: the parser rejects a continuation line that starts with ':' */
+  static const char color_new[] =
+      "            onColor: index === assignment.pageDownNote ? assignment.pageDownColour : (index === assignment.pageUpNote ? "
+      "assignment.pageUpColour : (dimmed ? Qt.darker(rootColour, darkerPerColor[colIdx]) : rootColour))";
+  static const char safetext_new[] =
+      "                property bool isPage: index === assignment.pageDownNote || index === assignment.pageUpNote\n"
+      "                property string pageText: index === assignment.pageDownNote ? \"DOWN\" : \"UP\"\n"
+      "                property string safeText: recentActivityPresent ? (isPage ? pageText : text) : \"\"";
+  static const char draw_new[] =
+      "                    if (isPage && safeText !== \"\")\n"
+      "                    {\n"
+      "                        font.pixelSize = 23\n"
+      "                        drawAbbreviatedTextInRect(0, 0, 128, 31, Painter.AlignCenter, \"PAGE \" + safeText);\n"
+      "                    }\n"
+      "                    else\n"
+      "                    {\n"
+      "                        font.pixelSize = 30\n"
+      "                        drawAbbreviatedTextInRect(0,0, 128, 31, Painter.AlignCenter, safeText);\n"
+      "                    }";
+
+  char* t1 = edit_once(qml_text, props_anchor, props, EDIT_REPLACE, "Assignments QML (properties)", err, err_size);
+  if (!t1)
+    return false;
+  char* t2 = edit_once(t1, QML_COLOR_ANCHOR, color_new, EDIT_REPLACE, "Assignments QML (LED colour)", err, err_size);
+  free(t1);
+  if (!t2)
+    return false;
+  char* t3 = edit_once(t2, QML_SAFETEXT_ANCHOR, safetext_new, EDIT_REPLACE, "Assignments QML (strip text)", err, err_size);
+  free(t2);
+  if (!t3)
+    return false;
+  char* t4 = edit_once(t3, QML_DRAW_ANCHOR, draw_new, EDIT_REPLACE, "Assignments QML (strip drawing)", err, err_size);
+  free(t3);
+  if (!t4)
+    return false;
+  *out = t4;
+  return true;
+}
+
+/* Installs the display override and writes the notes as the daemon's built-in config, so the labels and the keys
+ * cannot disagree (a PagePedal.conf on the USB drive still overrides the daemon's notes, but not the labels). */
+static bool install_display(Ext4Image* img, int page_down_note, int page_up_note, char* err, size_t err_size)
+{
+  uint8_t* raw = NULL;
+  size_t raw_len = 0;
+  if (!nam_ext4_dump(img, ASSIGNMENTS_PATH, &raw, &raw_len, err, err_size))
+    return false;
+  char* text = (char*)malloc(raw_len + 1);
+  if (!text)
+  {
+    free(raw);
+    set_err(err, err_size, "out of memory");
+    return false;
+  }
+  memcpy(text, raw, raw_len);
+  text[raw_len] = '\0';
+  free(raw);
+  char* patched = NULL;
+  bool ok = nam_page_pedal_patch_assignments(text, page_down_note, page_up_note, &patched, err, err_size);
+  free(text);
+  if (!ok)
+    return false;
+  ok = nam_ext4_inject(img, ASSIGNMENTS_PATH, (const uint8_t*)patched, strlen(patched), 0644, err, err_size);
+  free(patched);
+  if (!ok)
+    return false;
+  char conf[96];
+  snprintf(conf, sizeof(conf), "page_down_note=%d\npage_up_note=%d\n", page_down_note, page_up_note);
+  return nam_ext4_inject(img, "/usr/Evil/pagepedal.conf", (const uint8_t*)conf, strlen(conf), 0644, err, err_size);
+}
+
+bool nam_page_pedal_install(Ext4Image* img, const uint8_t* daemon, size_t daemon_len, int page_down_note,
+                           int page_up_note, char* err, size_t err_size)
 {
   static const char* const scripts[] = {"usb-otg-audio-start.sh", "usb-otg-audio-stop.sh", "setup-mass-storage.sh",
                                         "remove-mass-storage.sh"};
@@ -264,5 +384,5 @@ bool nam_page_pedal_install(Ext4Image* img, const uint8_t* daemon, size_t daemon
   for (size_t i = 0; i < sizeof(scripts) / sizeof(scripts[0]); ++i)
     if (!patch_one(img, scripts[i], err, err_size))
       return false;
-  return true;
+  return install_display(img, page_down_note, page_up_note, err, err_size);
 }

@@ -31,6 +31,35 @@ sacrificial pedal); only the absolute addresses differ, re-derived from each
 `Evil` the way `patch/patch_gonkulator.py`'s docstring documents. On-screen
 knob labels stay stock **Drive / Tone / Level** on all three devices.
 
+## CPU budget (how many NAMs can run)
+
+The audio callback runs 48 frames per block, so one block is **1000 us** for
+everything on the board. Measured on the Pedalboard with the NAM pedals:
+
+- A2 (slimmable) models have only **two sizes**, whatever ratio is requested:
+  about **680 us** per channel for the large one and about **104 us** for the
+  small one. Calibration picks the largest that fits a per-instance budget
+  (`1000 us / running instances`, with a 50% safety margin) and in practice
+  always lands on the small one.
+- Each instance runs one model per channel. Run as two channels, an instance
+  costs ~250 us per block, so **three active NAMs (~780 us) overran** while two
+  (~520 us) did not; the symptom was crackle until a scene deactivated one.
+- **Dual mono**: a guitar is normally the same signal on both channels, so when
+  the two input buffers are bit-identical the model runs once and its output is
+  copied (about halving the cost). `dsp[1]` is left idle meanwhile and is run
+  again from its stale state if the channels ever differ (a stereo effect before
+  the pedal), at worst a short transient. A true-stereo input still costs double.
+- The calibration benchmark times one channel and multiplies by two (the
+  conservative case). The instance count that divides the budget only counts
+  engines whose `process()` ran in the last 200 ms; slots are never released, so
+  engines of a rig that was left used to count forever and starved the budget.
+- No I/O on the audio thread: it only bumps counters (`ModelState::cpu_*`,
+  calibration state) and the watcher thread prints them (`[nam_cpu]`,
+  `[nam_cal]`, `[nam_load]`, `[nam_eng]` in the journal). A `fprintf` to the
+  journal from the audio thread can block it, which is an audible dropout.
+- The display watcher's heap sweep runs on engine changes and otherwise every
+  ~8 s, not every second.
+
 ## Knob implementation
 
 Anxiety OD's on-screen labels stay stock (**Drive / Tone / Level**) on every

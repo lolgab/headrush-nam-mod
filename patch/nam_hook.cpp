@@ -458,6 +458,13 @@ constexpr int kMaxChannels = 2;
 struct ModelState
 {
   std::atomic<int> cal_state{-1}; // last Hi-Lo / Gain state seen (for the log line on a change)
+  // audio-callback cost of this instance (diagnostics: crackle = blocks over the 1 ms deadline). The audio thread only
+  // bumps these counters; the watcher thread prints and resets them -- no I/O ever happens on the audio thread, a
+  // stderr write to the journal can block it for ~50 ms, an audible dropout.
+  std::atomic<int64_t> last_call_ms{0}; // when process() last ran: engines of a rig that is not loaded stop counting
+  std::atomic<uint64_t> cpu_sum_ns{0};
+  std::atomic<uint32_t> cpu_max_us{0}, cpu_n{0}, cpu_over{0};
+  std::atomic<float> last_model{0}, last_in{0}, last_out{0};
   // One independent nam::DSP instance per channel -- NAM models carry
   // internal state (WaveNet hidden state, history ring buffers), so feeding
   // L then R through a single shared instance would corrupt both channels'
@@ -693,9 +700,13 @@ constexpr double kCalibrationSafetyMargin = 0.5;
 // already exist.
 int count_claimed_instances()
 {
+  // Slots are never released, so an engine of a rig that was left would count forever: only instances whose process()
+  // ran within the last 200 ms share the audio callback's budget right now. (Bypassed pedals still run process().)
+  const int64_t now = now_ms();
   int n = 0;
   for (auto& inst : g_instances)
-    if (inst.owner_this.load(std::memory_order_acquire) != nullptr)
+    if (inst.owner_this.load(std::memory_order_acquire) != nullptr
+        && now - inst.last_call_ms.load(std::memory_order_relaxed) < 200)
       ++n;
   return n;
 }
@@ -719,6 +730,8 @@ double calibrate_slimmable_quality(nam::DSP& dsp, nam::SlimmableModel& slimmable
   float* in_arr[1] = {test_signal.data()};
   float* out_arr[1] = {scratch.data()};
 
+  // The ratio is NOT continuous: the model only has the sizes between its breakpoints (A2 models: two, "Lite" and
+  // "Full"). Measured on hardware per channel: ~680 us for the large size, ~104 us for the small one.
   for (size_t tier = num_tiers; tier-- > 0;) // highest quality first
   {
     const double ratio = (static_cast<double>(tier) + 0.5) / static_cast<double>(num_tiers);
@@ -733,9 +746,15 @@ double calibrate_slimmable_quality(nam::DSP& dsp, nam::SlimmableModel& slimmable
                              std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count())
                            / static_cast<double>(kCalibrationIters);
 
-    if (avg_us < budget_us * kCalibrationSafetyMargin)
+    // the benchmark runs ONE channel's model; instances normally run one (dual-mono input, see nam_process_common) but
+    // two when the input is true stereo, so the conservative cost is avg_us * kMaxChannels
+    std::fprintf(stderr, "[nam_cal] instances=%d budget=%.0fus tier=%zu/%zu ratio=%.2f avg=%.0fus x%d channels need<%.0fus\n",
+                 concurrent_instances, budget_us, tier, num_tiers, ratio, avg_us, static_cast<int>(kMaxChannels),
+                 budget_us * kCalibrationSafetyMargin);
+    if (avg_us * kMaxChannels < budget_us * kCalibrationSafetyMargin)
       return ratio;
   }
+  std::fprintf(stderr, "[nam_cal] nothing fit the budget: falling back to the minimum tier\n");
   return 0.0; // nothing fit safely -- fall back to minimum/Lite
 }
 
@@ -865,6 +884,8 @@ void switch_model_in_background(ModelState& s, float raw, bool force_reload_same
             else
               slimmable->SetSlimmableSize(entry.ratio);
             chosen_ratio = entry.ratio;
+            std::fprintf(stderr, "[nam_load] model %d tier=%.2f instances=%d epoch=%d\n", idx, chosen_ratio,
+                         count_claimed_instances(), live_epoch);
           }
           else
             slimmable->SetSlimmableSize(chosen_ratio);
@@ -1135,12 +1156,13 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
 }
 
 // The additive NAM pedals (see core/spy_patch.h): their engine is a Glorious Drive clone whose three 0..1 knobs
-// sit at +0x540 (Level = output), +0x554 (Drive = model) and +0x568 (Tone = input) -- confirmed on hardware:
+// sit at +0x540 (Level = input), +0x554 (Drive = model) and +0x568 (Tone = output) -- the editor lists Level before
+// Tone, so the input comes first; the engine floats themselves are confirmed on hardware:
 // the engine creates them in Level, Drive, Tone order, like Anxiety OD's.
 extern "C" void nam_process_eng(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
                                  float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
 {
-  static const KnobLayout kEng = {0x554, 0x568, 0x540, 0x26b, 0x57c, true};
+  static const KnobLayout kEng = {0x554, 0x540, 0x568, 0x26b, 0x57c, true}; // model, input, output
   nam_process_common(this_, input, numChannels, output, numFrames, kEng);
 }
 
@@ -1155,22 +1177,35 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
     numChannels = kMaxChannels;
 
   auto& s = state_for(this_); // per-engine-instance state -- see its own comment
+  struct CpuTimer
+  {
+    ModelState& st;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    ~CpuTimer()
+    {
+      const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+      const uint32_t us = static_cast<uint32_t>(ns / 1000);
+      st.cpu_sum_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
+      if (us > st.cpu_max_us.load(std::memory_order_relaxed))
+        st.cpu_max_us.store(us, std::memory_order_relaxed);
+      st.cpu_n.fetch_add(1, std::memory_order_relaxed);
+      if (us > 800) // 48 frames at 48 kHz = 1000 us per block, shared by every instance
+        st.cpu_over.fetch_add(1, std::memory_order_relaxed);
+    }
+  } cpu_timer{s};
+  s.last_call_ms.store(now_ms(), std::memory_order_relaxed);
   {
     // Heartbeat to the journal: the first call, then roughly every 16 s of audio. Temporary bring-up diagnostics for
     // the additive NAM pedals (is the hook reached at all, with which knob values, is a model active?).
     const uint32_t n = s.calls.fetch_add(1, std::memory_order_relaxed);
     if (kl.db_trim && n == 0)
       s.is_eng.store(true, std::memory_order_relaxed);
-    if (kl.db_trim && (n == 0 || (n & 0x1fff) == 0))
+    if (kl.db_trim)
     {
       const uint8_t* b = reinterpret_cast<const uint8_t*>(this_);
-      std::fprintf(stderr,
-                   "[nam_eng] this=%p call#%u ch=%u frames=%d model=%.3f in=%.3f out=%.3f bypass=%u ready=%d active=%d "
-                   "models=%zu hilo=0x%08x\n",
-                   this_, n, numChannels, numFrames, *reinterpret_cast<const float*>(b + kl.model),
-                   *reinterpret_cast<const float*>(b + kl.input), *reinterpret_cast<const float*>(b + kl.output),
-                   b[kl.bypass], s.ready.load() ? 1 : 0, s.active_index.load(), g_cached_models.size(),
-                   *reinterpret_cast<const uint32_t*>(b + kl.hilo));
+      s.last_model.store(*reinterpret_cast<const float*>(b + kl.model), std::memory_order_relaxed);
+      s.last_in.store(*reinterpret_cast<const float*>(b + kl.input), std::memory_order_relaxed);
+      s.last_out.store(*reinterpret_cast<const float*>(b + kl.output), std::memory_order_relaxed);
     }
   }
   const int32_t kFadeOutLenSamples = fade_out_len_samples();
@@ -1381,8 +1416,8 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
   // dsp[0] is non-null whenever a real model is active (see silent_active below); the model is only swapped while
   // faded out / muted, so reading its metadata here is safe.
   const bool cal_on = hilo_is_on(this_, kl.hilo);
-  if (kl.db_trim && static_cast<int>(cal_on) != s.cal_state.exchange(static_cast<int>(cal_on), std::memory_order_relaxed))
-    std::fprintf(stderr, "[nam_eng] %p calibration %s\n", this_, cal_on ? "ON (Gain High)" : "off (Gain Low)");
+  if (kl.db_trim)
+    s.cal_state.store(static_cast<int>(cal_on), std::memory_order_relaxed); // printed by the watcher thread
   if (s.active_index.load(std::memory_order_relaxed) >= 0 && cal_on)
   {
     in_gain *= calibration_gain(s.dsp[0].get());
@@ -1405,9 +1440,16 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
 
   const int fade_state = s.fade_state.load(std::memory_order_relaxed);
   const bool silent_active = s.active_index.load(std::memory_order_relaxed) < 0;
+  // Dual mono: a guitar is normally the same signal on both channels, and then one model run gives both outputs.
+  // Each model costs ~100 us per channel on this CPU, three instances running two channels each overran the 1 ms
+  // block (confirmed on hardware); running one halves that. dsp[1] is left idle meanwhile; if the channels ever differ
+  // (a stereo effect before the pedal) it is run again from its stale state, at worst a short transient.
+  const bool dual_mono = numChannels == 2 && input[0] && input[1] && output[0] && output[1] && !silent_active
+                         && std::memcmp(output[0], output[1], static_cast<size_t>(numFrames) * sizeof(float)) == 0;
+  const uint32_t dsp_channels = dual_mono ? 1u : numChannels;
   if (fade_state == 0)
   {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    for (uint32_t ch = 0; ch < dsp_channels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
@@ -1425,7 +1467,7 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
   }
   else if (fade_state == 1) // fading OUT the current (about-to-be-replaced) model
   {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    for (uint32_t ch = 0; ch < dsp_channels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
@@ -1485,7 +1527,7 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
   }
   else // fade_state == 2: fading IN the newly-installed model
   {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    for (uint32_t ch = 0; ch < dsp_channels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
@@ -1514,6 +1556,9 @@ static void nam_process_common(void* this_, float** input, uint32_t numChannels,
       s.fade_state.store(0, std::memory_order_relaxed); // transition complete
     }
   }
+
+  if (dual_mono && fade_state != 3)
+    std::memcpy(output[1], output[0], static_cast<size_t>(numFrames) * sizeof(float));
 
   // Same reasoning as the input clamp above: different .nam models have
   // different inherent output loudness, so an out_gain boost that didn't
@@ -1776,6 +1821,12 @@ void clone_desc(uintptr_t dst, uintptr_t src)
   if (!safe_read(src, d, kDescSize))
     return;
   // defaults, min, max, step and the inline format string; the vtable / bookkeeping stay the destination's own
+  std::memcpy(reinterpret_cast<void*>(dst + 0x18), d + 0x18, kDescSize - 0x18);
+}
+
+// Same, from a saved copy of the donor's bytes (the live FX-Loop desc is replaced by the UI like any other)
+void clone_desc_bytes(uintptr_t dst, const uint8_t* d)
+{
   std::memcpy(reinterpret_cast<void*>(dst + 0x18), d + 0x18, kDescSize - 0x18);
 }
 
@@ -2055,6 +2106,53 @@ struct Binding
   uintptr_t prop, desc;
 };
 
+// Prints the engines' counters (see ModelState::cpu_*) from the watcher thread, never from the audio thread.
+void report_engine_stats()
+{
+  static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+  static int printed_cal[kMaxInstances];
+  static bool init = false;
+  if (!init)
+  {
+    for (int& v : printed_cal)
+      v = -1;
+    init = true;
+  }
+  for (int k = 0; k < kMaxInstances; ++k)
+  {
+    auto& st = g_instances[k];
+    void* o = st.owner_this.load(std::memory_order_acquire);
+    if (!o || !st.is_eng.load(std::memory_order_relaxed))
+      continue;
+    const int cal = st.cal_state.load(std::memory_order_relaxed);
+    if (cal >= 0 && cal != printed_cal[k])
+    {
+      printed_cal[k] = cal;
+      std::fprintf(stderr, "[nam_eng] %p calibration %s\n", o, cal ? "ON (Gain High)" : "off (Gain Low)");
+    }
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::seconds(8))
+    return;
+  last = now;
+  for (int k = 0; k < kMaxInstances; ++k)
+  {
+    auto& st = g_instances[k];
+    void* o = st.owner_this.load(std::memory_order_acquire);
+    if (!o || !st.is_eng.load(std::memory_order_relaxed))
+      continue;
+    const uint32_t n = st.cpu_n.exchange(0, std::memory_order_relaxed);
+    if (!n)
+      continue; // not running (its rig is not loaded)
+    const uint64_t sum = st.cpu_sum_ns.exchange(0, std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[nam_cpu] %p blocks=%u avg=%.0fus max=%uus over800us=%u active=%d model=%.3f in=%.3f out=%.3f models=%zu\n",
+                 o, n, static_cast<double>(sum) / n / 1000.0, st.cpu_max_us.exchange(0, std::memory_order_relaxed),
+                 st.cpu_over.exchange(0, std::memory_order_relaxed), st.active_index.load(), st.last_model.load(),
+                 st.last_in.load(), st.last_out.load(), g_cached_models.size());
+  }
+}
+
 void display_watcher()
 {
   lower_background_thread_priority();
@@ -2069,8 +2167,13 @@ void display_watcher()
   int since_scan = 1000;
   int last_models = -1;
   std::map<uintptr_t, std::pair<float, size_t>> last_val;
+  // saved FX-Loop Return / Send descs: the dB template the Level / Tone descs are converted from, at any moment
+  uint8_t ret_bytes[kDescSize] = {}, send_bytes[kDescSize] = {};
+  bool have_donors = false;
+  int percent_passes = 0; // consecutive passes with an unconverted Level / Tone desc (debounces the curve switch)
   for (int loops = 0;; ++loops)
   {
+    report_engine_stats();
     last_val.clear(); // re-verify every desc once per pass (a recreated desc may sit at the same address)
     const auto fast_names = drive_names();
     for (int sub = 0; sub < (loops < 1000 ? 30 : 250); ++sub)
@@ -2078,11 +2181,20 @@ void display_watcher()
       usleep(2 * 1000);
       // Every knob move leaves the prop pointing at a fresh desc object: follow prop -> current desc each tick (a few
       // 4-byte reads per prop) so the text is patched within ms, not at the next heap sweep
-      if (fast_names.empty())
-        continue;
       for (const auto& b : bound)
       {
-        if (b.kind != Binding::Drive)
+        if ((b.kind == Binding::Level || b.kind == Binding::Tone) && have_donors)
+        {
+          // a fresh desc the UI just made for this fader reads percent: make it dB at once (a percent display and
+          // the old gain curve in between is what sounded "linear")
+          const uintptr_t d = prop_desc(b.prop);
+          char head[4];
+          if (!d || !safe_read(d + 0x38, head, 4) || std::memcmp(head, "%.1f", 4) == 0 || !desc_sane(d, 0))
+            continue;
+          clone_desc_bytes(d, b.kind == Binding::Level ? ret_bytes : send_bytes);
+          continue;
+        }
+        if (fast_names.empty() || b.kind != Binding::Drive)
           continue;
         const uintptr_t d = prop_desc(b.prop);
         float v;
@@ -2123,7 +2235,7 @@ void display_watcher()
     }
     const bool engines_changed = engines != last_engines;
     last_engines = engines;
-    if (engines.empty() && since_scan < 16)
+    if (engines.empty() && since_scan < 128)
       continue;
 
     // props found earlier must still be the same objects (their path pointer and desc chain); else sweep again
@@ -2131,7 +2243,7 @@ void display_watcher()
       name_retries = 0;
     const bool missing_name = false;
     bool stale = bound.empty() || engines_changed || pending_scan
-                 || since_scan >= 16; // also every ~2 s: pedals added later bring fresh, still-percent translators
+                 || since_scan >= 128; // also every ~8 s: a bypassed pedal brings fresh, still-percent translators
     for (const auto& b : bound)
     {
       uint32_t pp;
@@ -2140,7 +2252,7 @@ void display_watcher()
     }
     if (stale)
       pending_scan = true;
-    if (pending_scan && since_scan >= (engines_changed || missing_name ? 2 : 16))
+    if (pending_scan && since_scan >= (engines_changed || missing_name ? 2 : 128))
     {
       since_scan = 0;
       const auto sweep_t0 = std::chrono::steady_clock::now();
@@ -2214,6 +2326,8 @@ void display_watcher()
     uint32_t want_vt = 0;
     if (!rd_u32(donor_ret, &want_vt) || !desc_sane(donor_ret, want_vt) || !desc_sane(donor_send, want_vt))
       continue;
+    if (safe_read(donor_ret, ret_bytes, kDescSize) && safe_read(donor_send, send_bytes, kDescSize))
+      have_donors = true;
 
     // Level <- Return, Tone <- Send (once: skipped when the desc already reads in dB)
     for (const auto& b : bound)
@@ -2245,13 +2359,32 @@ void display_watcher()
       }
       if (b.kind != Binding::Level && b.kind != Binding::Tone)
         continue;
-      char fmt[32] = {};
-      safe_read(b.desc + 0x38, fmt, 31);
-      const bool db = std::strstr(fmt, "dB") != nullptr;
+      // the fader's CURRENT desc (the cached one may be a replaced, stale object); a prop without one is a twin
+      // object nothing reads
+      const uintptr_t d = prop_desc(b.prop);
+      char head[4];
+      if (!d || !safe_read(d + 0x38, head, 4))
+        continue;
+      const bool db = std::memcmp(head, "%.1f", 4) == 0;
       all_db = all_db && db;
       (b.kind == Binding::Level ? any_level : any_tone) = true;
     }
-    const bool use_db = any_level && any_tone && all_db;
+    // only fall back to the old curve if an unconverted desc persists (the 2 ms loop converts a new one at once)
+    percent_passes = (any_level && any_tone && !all_db) ? percent_passes + 1 : 0;
+    static bool curve_db = false;
+    if (any_level && any_tone && all_db)
+      curve_db = true;
+    else if (percent_passes >= 8)
+      curve_db = false;
+    const bool use_db = curve_db;
+    static int last_use_db = -1;
+    if (static_cast<int>(use_db) != last_use_db)
+    {
+      last_use_db = static_cast<int>(use_db);
+      std::fprintf(stderr, "[nam_disp] gain curve: %s (Level descs in dB: %s, Tone: %s, all in dB: %s)\n",
+                   use_db ? "dB" : "PERCENT (old curve)", any_level ? "some" : "none", any_tone ? "some" : "none",
+                   all_db ? "yes" : "no");
+    }
     for (int k = 0; k < kMaxInstances; ++k)
       if (g_instances[k].is_eng.load(std::memory_order_relaxed))
         g_instances[k].disp_db.store(use_db, std::memory_order_relaxed);

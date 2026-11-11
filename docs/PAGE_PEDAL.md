@@ -32,6 +32,24 @@ assigned, it will do that *and* send the key.
 
 Held down, a switch repeats the way a held keyboard key does.
 
+## Labels and colours
+
+With the mod installed, the two switches also *look* the part: the footswitch
+LED of **Page Down** is **blue** and the one of **Page Up** is **white**, always
+lit, and their small screens read **PAGE DOWN** and **PAGE UP** instead of what
+the rig assigns to them (the rig's own colour and label for those two switches
+are overridden). The other ten switches are untouched. Verified on a real
+Pedalboard: the strips and LEDs change as described (the 128x32 text is drawn
+at 23 px on one line; two lines at 16 px were too small).
+
+The labels follow the same two notes as the keys. They are fixed when the image
+is built (defaults FS11 = Page Down, FS5 = Page Up); to put them on other
+switches build with `--page-down-note N --page-up-note M` (0-based, FS number
+minus 1, so `--page-down-note 6 --page-up-note 7` is FS7 / FS8). The installer
+also writes the notes to `/usr/Evil/pagepedal.conf`, so keys and labels agree. A
+`PagePedal.conf` on the USB drive (see Calibrating) still moves the *keys* at
+runtime but not the labels: rebuild if you change the notes for good.
+
 ## Calibrating (which physical switch is which)
 
 The factory firmware numbers the 12 switches FS1-FS12 (panel notes 0-11), but
@@ -68,6 +86,18 @@ USB-drive image is not visible to the device while it is exported to the
 computer, so edit it in USB-drive mode and reboot (or just reboot).
 
 ## How it works
+
+0. **Labels and colours.** The panel's LED colours and its twelve 128x32 label
+   strips are painted by `/usr/Evil/Assignments/M-Audio_Pass_Through_Assignments.qml`
+   (colour from `/Engine/RedirCtrl/ButtonCol<n>`, text from `ButtonText<n>`, sent
+   to the panel as SysEx). Unlike the UI's own QML, which is compiled into
+   `Evil`, this file is read from disk at start-up, so the installer patches its
+   text (`nam_page_pedal_patch_assignments`, anchors checked to occur exactly
+   once, idempotent): a fixed colour and label for the two notes. Gotchas found
+   while testing it live (a bind mount over the file and a restart of Evil, no
+   flash needed): a multi-line binding whose continuation line starts with `:`
+   makes the parser reject the whole file ("Malformed Assignment file"), so
+   every binding stays on one line.
 
 1. **Where the footswitches come from.** The panel talks to Evil over internal
    MIDI. `/usr/Evil/Assignments/M-Audio_Pass_Through_Assignments.qml` maps

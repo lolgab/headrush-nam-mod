@@ -14,8 +14,8 @@ Code: `patch/nam_hook.cpp` (the "display" section at the end of the file,
 | Knob  | Engine meaning        | Display                                   |
 |-------|-----------------------|-------------------------------------------|
 | Drive | model selection       | file number `1..N`, plus the file name    |
-| Level | output volume         | dB, same scale as the FX-Loop *Return*    |
-| Tone  | input volume          | dB, same scale as the FX-Loop *Send*      |
+| Level | input volume          | dB, same scale as the FX-Loop *Return*    |
+| Tone  | output volume         | dB, same scale as the FX-Loop *Send*      |
 
 The captions (DRIVE / LEVEL / TONE) cannot be changed; see "Dead ends".
 

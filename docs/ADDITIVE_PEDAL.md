@@ -82,7 +82,8 @@ stock ones.
    engine pointer.
 6. **Knobs.** The Glorious Drive engine floats are, by creation order, Level at
    `0x540`, Drive at `0x554`, Tone at `0x568`; the pedal maps
-   Drive = model, Level = output volume, Tone = input volume. The default 0.5
+   Drive = model, Level = input volume, Tone = output volume (the editor lists Level before
+   Tone, so the input comes first). The default 0.5
    must land on a real model, so the model knob sweeps the files by index.
 7. **Display.** Level / Tone read in dB and Drive shows the model number and
    file name, by rewriting translator descs at runtime from a watcher thread

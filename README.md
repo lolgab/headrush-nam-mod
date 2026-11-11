@@ -111,8 +111,8 @@ pedalboard behaves as before.
 | Knob | Function | Display |
 |---|---|---|
 | **DRIVE** | selects the `.nam` model | model number `1..N` and the file name |
-| **TONE** | input volume | dB, same scale as the FX Loop SEND |
-| **LEVEL** | output volume | dB, same scale as the FX Loop RETURN |
+| **LEVEL** | input volume | dB, same scale as the FX Loop RETURN |
+| **TONE** | output volume | dB, same scale as the FX Loop SEND |
 | **GAIN** (Low / High) | calibration | **High** = on, see "Gain staging" |
 
 The knob captions can't be changed (they are looked up by name in the
@@ -149,9 +149,11 @@ Tick **Footswitch page-turner** in the installer (or pass `--page-pedal` to
 the CLI) and the Pedalboard also acts as a USB keyboard for the computer it's
 plugged into: the 5th footswitch from the left, **upper** row = **Page Down**,
 **lower** row = **Page Up**, for turning pages in a PDF. Leave those two
-switches unassigned in the HeadRush UI. The upper/lower numbering is a guess
-until confirmed on hardware, and there's a built-in calibration mode — see
-[docs/PAGE_PEDAL.md](docs/PAGE_PEDAL.md).
+switches unassigned in the HeadRush UI. The two switches light up (Page Down
+blue, Page Up white) and their small screens read **PAGE DOWN** / **PAGE UP**.
+The upper/lower numbering is a guess until confirmed on hardware, and there's a
+built-in calibration mode (and `--page-down-note` / `--page-up-note` to move the
+labels) — see [docs/PAGE_PEDAL.md](docs/PAGE_PEDAL.md).
 
 ## Supported models
 
@@ -166,7 +168,7 @@ flashing another model's file will almost certainly brick the device.
 
 ## Gain staging
 
-**NAM pedals**: TONE (input) and LEVEL (output) are dB faders from -60 dB to
+**NAM pedals**: LEVEL (input) and TONE (output) are dB faders from -60 dB to
 +12 dB (0 dB = unity), the same scale and display as the FX Loop SEND/RETURN.
 The bottom of the travel is silence.
 
