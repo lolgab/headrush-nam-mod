@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build_blobs_native.sh -- the actual ARM cross-compile logic for
-# blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin}.
+# blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin} and the
+# remote-screen mod's blobs/mx5_screen_server.
 # Assumes the prefixed Bootlin ARM toolchain (arm-buildroot-linux-
 # gnueabihf-{g++,as,objcopy,strip}) is already on PATH and nam_core/ is
 # already populated (scripts/fetch_nam_core.sh) -- neither is this
@@ -46,8 +47,15 @@ mkdir -p "$WORK"
 "$STRIP" --strip-unneeded -o "$WORK"/pagepedal.bin "$WORK"/pagepedal.unstripped
 rm -f "$WORK"/pagepedal.unstripped
 
+# remote-screen mod (mods/remote_screen/). Plain C, glibc only; same flags
+# as that mod's own dev-loop build.sh.
+"$CC" -O2 -Wall -Wextra -Wno-unused-parameter \
+    mods/remote_screen/mx5_screen_server.c -ldl -o "$WORK"/mx5_screen_server.unstripped
+
 "$STRIP" --strip-unneeded -o "$WORK"/libnam_hook.so "$WORK"/libnam_hook.unstripped.so
 "$STRIP" --strip-unneeded -o "$WORK"/libnam_preload.so "$WORK"/libnam_preload.unstripped.so
-rm -f "$WORK"/libnam_hook.unstripped.so "$WORK"/libnam_preload.unstripped.so "$WORK"/trampoline_gonk.o
+"$STRIP" -o "$WORK"/mx5_screen_server "$WORK"/mx5_screen_server.unstripped
+rm -f "$WORK"/libnam_hook.unstripped.so "$WORK"/libnam_preload.unstripped.so "$WORK"/trampoline_gonk.o \
+    "$WORK"/mx5_screen_server.unstripped
 
-echo "OK  wrote $WORK/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,pagepedal.bin}"
+echo "OK  wrote $WORK/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,pagepedal.bin,mx5_screen_server}"

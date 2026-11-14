@@ -1,0 +1,10 @@
+# Shell scripts must keep LF endings on every checkout (they run under bash,
+# including MSYS2's on Windows CI).
+*.sh text eol=lf
+
+# Everything under mods/ is either installed verbatim on the device (scripts,
+# systemd units) or patched in byte-for-byte (Tuner_mx5.qml must be exactly
+# as long as the source it replaces). Never convert line endings here: a
+# Windows checkout with core.autocrlf (the default on GitHub's Windows
+# runners) would otherwise embed CRLF payloads into the installer.
+mods/** -text

@@ -23,13 +23,14 @@ NAM, so existing pedalboards that use it keep working. See below.
 
    Without these, `headrush-nam-gui` fails to launch with a
    `Library not loaded` error.
-2. Run it, pick your model (Pedalboard, MX5, or Gigboard), and click **Install
-   NAM Mod** — it downloads the official HeadRush firmware updater and builds
-   a patched copy of it in the current directory. On the Pedalboard it adds the
-   NAM pedals by default; tick **Also make Anxiety OD run NAM** if you have
-   pedalboards that use Anxiety OD as the NAM engine and want to keep them
-   (see "The pedals" below). MX5 and Gigboard don't have the NAM pedals yet and
-   always use the Anxiety OD design.
+2. Run it, pick your model (Pedalboard, MX5, or Gigboard), tick the mods you
+   want, and click **Install** — it downloads the official HeadRush firmware
+   updater and builds a patched copy of it in the current directory. On the
+   Pedalboard the NAM pedals are selected by default; also tick **Make Anxiety
+   OD run NAM** if you have pedalboards that use Anxiety OD as the NAM engine
+   and want to keep them (see "The pedals" below). MX5 and Gigboard don't have
+   the NAM pedals yet and default to the Anxiety OD design. See "Optional mods"
+   below for the rest; every mod, NAM included, can be left out.
 3. Put your device in firmware-update mode. See
    [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a
    walkthrough.
@@ -123,9 +124,9 @@ can lag behind a fast knob turn until you stop or reopen the page. See
 
 ### Anxiety OD option (all models, opt-in)
 
-Tick **Also make Anxiety OD run NAM** in the installer (Pedalboard; MX5 and
-Gigboard always use it) if you have pedalboards that use Anxiety OD as the
-NAM engine and want to keep them. On the device, add the **Anxiety OD** pedal.
+Tick **Make Anxiety OD run NAM** in the installer (on MX5 and Gigboard it's
+the default, since they have no NAM pedals yet) if you have pedalboards that
+use Anxiety OD as the NAM engine and want to keep them. On the device, add the **Anxiety OD** pedal.
 
 | Knob | Function |
 |---|---|
@@ -138,8 +139,8 @@ on every instance. The two options can be installed together on the Pedalboard.
 
 **2 instances vs up to 4**: the stock firmware allows up to 2 Anxiety OD
 blocks on a board, so by default that's 2 NAM instances max, and Anxiety OD
-**V2** is left untouched, still available with its original sound. Pick
-**up to 4 instances** to also hijack Anxiety OD V2 (also addable up to twice)
+**V2** is left untouched, still available with its original sound. Tick
+**Also make Anxiety OD V2 run NAM** to also hijack Anxiety OD V2 (also addable up to twice)
 the same way, for up to 4 hijacked NAM instances total — at the cost of losing
 Anxiety OD V2's real sound board-wide too.
 
@@ -154,6 +155,26 @@ blue, Page Up white) and their small screens read **PAGE DOWN** / **PAGE UP**.
 The upper/lower numbering is a guess until confirmed on hardware, and there's a
 built-in calibration mode (and `--page-down-note` / `--page-up-note` to move the
 labels) — see [docs/PAGE_PEDAL.md](docs/PAGE_PEDAL.md).
+
+## Optional mods
+
+The installer can add other mods alongside NAM, or instead of it. Tick the
+ones you want; mods that don't apply to your model are greyed out. Each mod's
+own README has the details.
+
+| Mod | What it does | Models |
+|---|---|---|
+| NAM pedals | the **NAM** / **NAM TWO** pedals described above | Pedalboard |
+| Anxiety OD runs NAM (up to 2 instances) | the Anxiety OD option described above | all |
+| Also Anxiety OD V2 (up to 4 instances) | see "2 instances vs up to 4" above | all |
+| Footswitch page-turner | see "Footswitch page-turner" above | Pedalboard |
+| [USB serial console](mods/usb_console/README.md) | root shell over USB, plus a spare serial channel — **anyone with USB access gets root** | MX5 |
+| [Remote screen](mods/remote_screen/README.md) | see and operate the device's screen from a computer (browser viewer, no install) | MX5 |
+| [Tuner tempo edit](mods/tuner_tempo/README.md) | tap the tuner screen's tempo box to step BPM down/up | MX5 |
+
+The MX5-only mods were built and tested on an MX5; the installer won't apply
+them to other models. See [mods/README.md](mods/README.md) for what porting
+them would take.
 
 ## Supported models
 
@@ -212,6 +233,8 @@ TONE / LEVEL still trim on top. **Low** (the default) leaves the signal as is.
   the model readout, and what doesn't work.
 - [docs/BUILDING.md](docs/BUILDING.md) — building `headrush-nam-gui` from
   source.
+- [mods/README.md](mods/README.md) — the optional MX5 mods, adding a new
+  one, and porting them to other models.
 
 ## Disclaimer
 

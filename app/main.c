@@ -28,6 +28,7 @@
 
 #include "http_download.h"
 #include "model_targets.h"
+#include "mods.h"
 #include "nam_library.h"
 #include "patch_pipeline.h"
 #include "stock_cache.h"
@@ -168,10 +169,7 @@ typedef struct
   SDL_mutex* mutex;
   AppState state;
   int selected_model;
-  int enable_page_pedal; /* footswitch page-turner mod (Pedalboard only) -- int because nk_checkbox wants int* */
-  int add_nam_pedals;    /* Pedalboard: add the "NAM" and "NAM TWO" pedals (default on) */
-  int anxiety_hijack;    /* opt-in legacy mode: Anxiety OD runs NAM (always on for models without NAM pedals) */
-  bool enable_v2_hijack; /* with the hijack: false = 2 instances (Anxiety OD only), true = up to 4 (also Anxiety OD V2) */
+  NamModSelection mods; /* which mods to install, see core/mods.h */
   char log_lines[MAX_LOG_LINES][256];
   int log_count;
   uint64_t dl_downloaded, dl_total;
@@ -404,15 +402,11 @@ static int worker_main(void* data)
   AppShared* shared = (AppShared*)data;
 
   int model_index;
-  NamPatchOptions opts = {0};
+  NamPatchOptions opts;
+  memset(&opts, 0, sizeof(opts)); /* page-turner footswitches: the defaults (FS11 / FS5) */
   SDL_LockMutex(shared->mutex);
   model_index = shared->selected_model;
-  const bool is_pedalboard = strcmp(NAM_MODEL_TARGETS[model_index].name, "pedalboard") == 0;
-  /* only the Pedalboard has the NAM pedals; every other model keeps the Anxiety OD hijack as its only mode */
-  opts.nam_pedals = is_pedalboard && shared->add_nam_pedals != 0;
-  opts.anxiety_hijack = !is_pedalboard || shared->anxiety_hijack != 0;
-  opts.anxiety_v2 = opts.anxiety_hijack && shared->enable_v2_hijack;
-  opts.page_pedal = shared->enable_page_pedal != 0;
+  opts.mods = shared->mods;
   shared->downloading = true;
   SDL_UnlockMutex(shared->mutex);
 
@@ -887,7 +881,7 @@ int main(int argc, char** argv)
   shared.mutex = SDL_CreateMutex();
   shared.state = APP_STATE_PICK;
   shared.selected_model = 0;
-  shared.add_nam_pedals = 1; /* the NAM pedals are the default; the Anxiety OD hijack is opt-in */
+  shared.mods = nam_mods_default(NAM_MODEL_TARGETS[0].name);
 
   LibraryState lib;
   memset(&lib, 0, sizeof(lib));
@@ -918,67 +912,63 @@ int main(int argc, char** argv)
       if (state == APP_STATE_PICK)
       {
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Pick your device, then click Install.", NK_TEXT_LEFT);
+        nk_label(ctx, "Pick your device and the mods you want, then click Install.", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Downloads the official stock firmware and applies the NAM mod --", NK_TEXT_LEFT);
-        nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "no terminal, no extra tools needed.", NK_TEXT_LEFT);
+        nk_label(ctx, "Downloads the official stock firmware and applies them -- no extra tools.", NK_TEXT_LEFT);
 
-        nk_layout_row_dynamic(ctx, 30, 1);
+        nk_layout_row_dynamic(ctx, 30, NAM_MODEL_COUNT);
         for (int i = 0; i < NAM_MODEL_COUNT; ++i)
         {
           int selected = (shared.selected_model == i);
           if (nk_option_label(ctx, NAM_MODEL_TARGETS[i].name, selected) && !selected)
+          {
             shared.selected_model = i;
+            /* the right NAM option differs per model (NAM pedals on the Pedalboard, Anxiety OD elsewhere) */
+            shared.mods = nam_mods_default(NAM_MODEL_TARGETS[i].name);
+          }
         }
 
-        const bool pedalboard = strcmp(NAM_MODEL_TARGETS[shared.selected_model].name, "pedalboard") == 0;
-        if (pedalboard)
+        nk_layout_row_dynamic(ctx, 24, 1);
+        nk_label(ctx, "Mods:", NK_TEXT_LEFT);
+        const char* model_name = NAM_MODEL_TARGETS[shared.selected_model].name;
+        bool any_selected = false;
+        for (int i = 0; i < NAM_MOD_COUNT; ++i)
         {
-          nk_layout_row_dynamic(ctx, 28, 1);
-          nk_checkbox_label(ctx, "Add the NAM pedals (\"NAM\", \"NAM TWO\": four per rig)",
-                            &shared.add_nam_pedals);
-          nk_layout_row_dynamic(ctx, 28, 1);
-          nk_checkbox_label(ctx, "Also make Anxiety OD run NAM (keeps your existing pedalboards working)",
-                            &shared.anxiety_hijack);
-        }
-        else
-        {
-          shared.add_nam_pedals = 0;
-          shared.anxiety_hijack = 1;
-          nk_layout_row_dynamic(ctx, 24, 1);
-          nk_label(ctx, "This model has no NAM pedals yet: Anxiety OD runs NAM.", NK_TEXT_LEFT);
+          const NamModInfo* mod = &NAM_MODS[i];
+          bool supported = nam_mod_supports_model(mod, model_name);
+          if (!supported)
+            shared.mods.enabled[i] = false; /* never carry a selection over to a model it can't apply to */
+
+          char label[200];
+          if (supported)
+            snprintf(label, sizeof(label), "%s", mod->title);
+          else
+            snprintf(label, sizeof(label), "%s  [%s only]", mod->title, nam_mod_models_str(mod));
+
+          nk_layout_row_dynamic(ctx, 26, 1);
+          nk_bool checked = shared.mods.enabled[i];
+          if (!supported)
+            nk_widget_disable_begin(ctx);
+          if (nk_checkbox_label(ctx, label, &checked) && supported)
+          {
+            shared.mods.enabled[i] = checked;
+            if (checked && mod->requires != NAM_MOD_COUNT)
+              shared.mods.enabled[mod->requires] = true; /* pull in what it needs */
+            if (!checked)
+              for (int j = 0; j < NAM_MOD_COUNT; ++j) /* drop what needed it */
+                if (NAM_MODS[j].requires == (NamModId)i)
+                  shared.mods.enabled[j] = false;
+          }
+          if (!supported)
+            nk_widget_disable_end(ctx);
+          any_selected = any_selected || shared.mods.enabled[i];
         }
 
-        if (shared.anxiety_hijack)
-        {
-          nk_layout_row_dynamic(ctx, 28, 2);
-          int two = !shared.enable_v2_hijack;
-          if (nk_option_label(ctx, "2 Anxiety OD instances", two) && !two)
-            shared.enable_v2_hijack = false;
-          int four = shared.enable_v2_hijack;
-          if (nk_option_label(ctx, "Up to 4 (also Anxiety OD V2)", four) && !four)
-            shared.enable_v2_hijack = true;
-        }
-
-        nk_layout_row_dynamic(ctx, 28, 1);
-        if (pedalboard)
-          nk_checkbox_label(ctx, "Footswitch page-turner (FS5/FS11 -> USB Page Down/Up)", &shared.enable_page_pedal);
-        else
-        {
-          shared.enable_page_pedal = 0;
-          nk_label(ctx, "Footswitch page-turner: Pedalboard only", NK_TEXT_LEFT);
-        }
-
-        const bool nothing_selected = pedalboard && !shared.add_nam_pedals && !shared.anxiety_hijack;
-        if (nothing_selected)
-        {
-          nk_layout_row_dynamic(ctx, 20, 1);
-          nk_label(ctx, "Select the NAM pedals and/or the Anxiety OD option.", NK_TEXT_LEFT);
-        }
 
         nk_layout_row_dynamic(ctx, 40, 1);
-        if (nk_button_label(ctx, "Install NAM Mod") && !nothing_selected)
+        if (!any_selected)
+          nk_widget_disable_begin(ctx);
+        if (nk_button_label(ctx, any_selected ? "Install" : "Install (select at least one mod)") && any_selected)
         {
           SDL_LockMutex(shared.mutex);
           shared.state = APP_STATE_RUNNING;
@@ -987,6 +977,8 @@ int main(int argc, char** argv)
           SDL_UnlockMutex(shared.mutex);
           worker_thread = SDL_CreateThread(worker_main, "nam-worker", &shared);
         }
+        if (!any_selected)
+          nk_widget_disable_end(ctx);
 
         nk_layout_row_dynamic(ctx, 30, 1);
         if (nk_button_label(ctx, "Prepare NAM Library..."))
@@ -1040,7 +1032,7 @@ int main(int argc, char** argv)
         SDL_UnlockMutex(shared.mutex);
 
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Done! NAM mod applied.", NK_TEXT_LEFT);
+        nk_label(ctx, "Done! Mods applied.", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);
         nk_label(ctx, "Wrote:", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);

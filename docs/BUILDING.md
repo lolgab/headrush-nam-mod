@@ -20,12 +20,19 @@ applies the mod, and writes a ready-to-run result -- no terminal needed:
 - `core/` -- the portable pipeline: `fit_image` (FDT/FIT read+write),
   `elf_patch` (Anxiety OD vtable hijack), `qml_patch` (knob relabel),
   `ext4_image` (libext2fs-backed dump/inject/verify), `xz_codec`
-  (liblzma-backed compress/decompress), `launcher_script`, `model_targets`.
+  (liblzma-backed compress/decompress), `launcher_script`, `model_targets`,
+  `mods` (the list of selectable mods and their supported models) and
+  `device_mods` (apply steps for the non-NAM mods).
+- `mods/` -- the non-NAM mods: payload files installed verbatim on the
+  device, the remote-screen server source and viewers, and each mod's
+  README. See `mods/README.md`.
 - `blobs/` -- `libnam_hook.so` / `libnam_preload.so` / `trampoline_gonk.bin`,
-  cross-compiled from `patch/*.cpp`. These never depend on user input --
+  cross-compiled from `patch/*.cpp`, plus `mx5_screen_server` from
+  `mods/remote_screen/`. These never depend on user input --
   only on `patch/*.cpp` -- so end users never need the ARM toolchain
   themselves. **Pure build artifacts, deliberately NOT committed to git**
-  (the repo's own root `.gitignore` already excludes `*.so`/`*.bin`): CMake
+  (the repo's own root `.gitignore` excludes `*.so`/`*.bin` and the
+  extensionless `blobs/mx5_screen_server`): CMake
   rebuilds them automatically via `scripts/build_blobs.sh` (Docker + the
   same ARM cross-toolchain in `docker/Dockerfile`) whenever `patch/*.cpp`/
   `nam_core` changes, and every build target depends on that rebuild --
@@ -98,19 +105,34 @@ the `blobs/` entry above.
 CLI (local dev/debugging tool only, not built or shipped by CI):
 
 ```sh
-build/gui-core-cli <stock Update.img> <out.img> --model pedalboard|mx5|gigboard \
-    [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]]
+build/gui-core-cli <stock Update.img> <out.img> --model pedalboard|mx5|gigboard [--mods LIST] \
+    [--anxiety-hijack] [--instances 2|4] [--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]]
+build/gui-core-cli --list-mods
 ```
 
-Pedalboard default: adds the **NAM** and **NAM TWO** pedals (four instances) (see
-docs/ADDITIVE_PEDAL.md). `--anxiety-hijack` additionally makes Anxiety OD run
-NAM (the older, opt-in design for keeping existing pedalboards working);
-`--instances 4` also hijacks Anxiety OD V2 for up to 4 hijacked instances and
-implies `--anxiety-hijack` (docs/TECHNICAL.md's "Up to 4 instances" section).
-`--no-nam-pedals` leaves the new pedals out (hijack only). `--page-pedal` also colours and labels the two page-turner footswitches
-(`--page-down-note` / `--page-up-note`, 0-based, default 10 and 4, move them; see
-docs/PAGE_PEDAL.md). MX5 and Gigboard have
-no NAM pedals yet and always get the Anxiety OD hijack.
+Without `--mods`, the model's default is installed: on the Pedalboard the
+**NAM** and **NAM TWO** pedals (four instances, see docs/ADDITIVE_PEDAL.md),
+elsewhere the Anxiety OD hijack (MX5 and Gigboard have no NAM pedals yet).
+`--mods` takes an exact comma-separated list of mod keys instead
+(`nam-pedals`, `anxiety-hijack`, `anxiety-v2`, `page-pedal`, `usb-console`,
+`remote-screen`, `tuner-tempo`; `--list-mods` describes them and which
+models each supports). A mod's requirement must be listed too (e.g.
+`remote-screen` needs `usb-console`), and the CLI refuses mods that aren't
+verified for the chosen model.
+
+The other flags adjust either one. `--anxiety-hijack` adds the Anxiety OD
+hijack (the older design, opt-in on the Pedalboard, for keeping existing
+pedalboards working). `--instances 4` also hijacks Anxiety OD V2 for up to 4
+hijacked instances and implies `--anxiety-hijack` (docs/TECHNICAL.md's "Up to
+4 instances" section). `--no-nam-pedals` leaves the new pedals out (without
+`--mods`, the Anxiety OD hijack replaces them). `--page-pedal` adds the
+footswitch page-turner and colours and labels its two footswitches
+(`--page-down-note` / `--page-up-note`, 0-based, default 10 and 4, move them;
+see docs/PAGE_PEDAL.md). For example:
+
+```sh
+build/gui-core-cli stock.img out.img --model mx5 --mods anxiety-hijack,usb-console,remote-screen
+```
 
 The GUI caches the stock updater zip it downloads (`core/stock_cache.c`): one
 `<model>-<platform>.zip` plus a `.sha256` sidecar (hash and URL) per model in the
@@ -125,12 +147,14 @@ GUI -- can be run from anywhere, not just the repo root:
 build/headrush-nam-gui
 ```
 
-Both binaries are fully self-contained: `blobs/*` (compiled once by
+Both binaries are fully self-contained. `blobs/*` (compiled once by
 `scripts/build_blobs.sh`/`build_blobs_native.sh` via the ARM
-cross-toolchain) gets embedded directly into the executable as C byte
-arrays at build time (`tools/bin2c.c` generates the array sources, wired
-into `CMakeLists.txt`; see `core/patch_pipeline.c`, which references them
-via `core/nam_blobs_embedded.h` instead of reading files from disk). No
+cross-toolchain, including the remote-screen mod's `mx5_screen_server`) and
+the other mods' payload files under `mods/` are embedded directly into the
+executable as C byte arrays at build time (`tools/bin2c.c` generates the
+array sources, wired into `CMakeLists.txt`; `core/patch_pipeline.c` and
+`core/device_mods.c` reference them via `core/nam_blobs_embedded.h` and
+`core/mod_payloads_embedded.h` instead of reading files from disk). No
 external files, no directory layout to preserve -- a double-clicked or
 arbitrarily-relocated binary just works.
 

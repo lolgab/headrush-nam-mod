@@ -46,6 +46,15 @@ bool nam_ext4_dump(Ext4Image* img, const char* inner_path, uint8_t** out_data, s
 bool nam_ext4_inject(Ext4Image* img, const char* inner_path, const uint8_t* data, size_t len, uint32_t unix_mode,
                       char* err, size_t err_size);
 
+/* True if anything (file, directory, symlink) exists at `inner_path`. */
+bool nam_ext4_exists(Ext4Image* img, const char* inner_path);
+
+/* Creates (or replaces) a symlink at `link_path` pointing to `target` --
+ * e.g. enabling a systemd unit by linking it into a *.target.wants
+ * directory. The target is stored verbatim and need not exist. Parent
+ * directory of link_path must already exist. */
+bool nam_ext4_symlink(Ext4Image* img, const char* link_path, const char* target, char* err, size_t err_size);
+
 /* See this header's own comment on what this does and does not check. */
 bool nam_ext4_verify_basic(Ext4Image* img, char* err, size_t err_size);
 
