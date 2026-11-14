@@ -1,8 +1,8 @@
 # Optional mods
 
 Besides NAM, the installer can apply these mods. Pick any combination in the
-GUI, or with `gui-core-cli --mods` (see `docs/BUILDING.md`). The NAM mod is
-optional too.
+GUI, or with `gui-core-cli --mods` (see `docs/BUILDING.md`). The NAM options
+are optional too.
 
 | Mod | CLI key | Models | Requires |
 |---|---|---|---|
@@ -14,6 +14,11 @@ All three were developed and confirmed on a real MX5 running firmware 2.7.
 The installer refuses to apply them to any other model; the sections below
 cover what porting each one would take.
 
+The other entries in the installer's list are the NAM options (`nam-pedals`,
+`anxiety-hijack`, `anxiety-v2`) and the Pedalboard's footswitch page-turner
+(`page-pedal`, see [docs/PAGE_PEDAL.md](../docs/PAGE_PEDAL.md)). Their code
+lives in `core/` and `patch/` rather than here.
+
 ## How it fits together
 
 Every mod lives in this repo and is compiled into the installer — there is no
@@ -21,8 +26,9 @@ plugin format. A mod is:
 
 - an entry in `NAM_MODS` (`core/mods.c`): CLI key, GUI label, the models it
   has been **verified** on, and an optional required mod;
-- an apply step: NAM's is in `core/patch_pipeline.c`, the others are in
-  `core/device_mods.c`;
+- an apply step: the NAM options' and the page-turner's are in
+  `core/patch_pipeline.c` (with `core/spy_patch.c` and `core/page_pedal.c`),
+  the MX5 mods' are in `core/device_mods.c`;
 - payload files it installs, under `mods/<mod>/`, embedded into the binary at
   build time (`nam_embed_payload()` in `CMakeLists.txt`). Anything that has to
   be cross-compiled for the device goes through
@@ -69,6 +75,18 @@ To test: flash, check that the two serial ports appear and the shell works, then
 enter and leave **audio interface mode** and **USB drive mode**. Those mode
 switches are what the teardown patch exists for. Also check that power-off
 doesn't hang.
+
+**Interaction with the page-turner.** The Pedalboard's footswitch page-turner
+also claims the single UDC, for a USB keyboard gadget (`g4`), and patches the
+same two stock scripts at the same anchors. Its helper
+(`patch/pagepedal-usb.sh`) already knows about this mod: if the console's
+gadget `g3` exists, it adds the keyboard to `g3` instead of creating its own.
+The two have never been installed together, though (they currently target
+different models), and they would need to agree on who rebuilds which gadget
+after an audio-interface or USB-drive mode switch: the console's teardown
+removes `g3` entirely, after which the page-turner's `idle` call would bring
+up `g4` alone. Test that combination specifically if this mod is enabled for
+the Pedalboard.
 
 ### Remote screen — needs viewer changes, encoder work, and testing
 

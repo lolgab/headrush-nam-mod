@@ -37,4 +37,4 @@ docker run --rm \
     "$IMAGE" \
     scripts/build_blobs_native.sh
 
-echo "OK  wrote $DIR/blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,mx5_screen_server}"
+echo "OK  wrote $DIR/blobs/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,pagepedal.bin,mx5_screen_server}"

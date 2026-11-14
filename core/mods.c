@@ -5,25 +5,46 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Model lists are what has been verified, not what might work. The three
- * non-NAM mods were built and confirmed on MX5 2.7 hardware only; see
- * mods/README.md for what porting each one to Pedalboard/Gigboard needs. */
+/* Model lists are what has been verified, not what might work. The NAM
+ * pedals and the page-turner were built and tested on the Pedalboard; the
+ * MX5 mods (console, remote screen, tuner tempo) on MX5 2.7 hardware only.
+ * mods/README.md covers what porting the MX5 mods to the other models
+ * needs. */
 const NamModInfo NAM_MODS[NAM_MOD_COUNT] = {
   {
-    .id = NAM_MOD_NAM,
-    .key = "nam",
-    .title = "NAM models in Anxiety OD (up to 2 instances)",
-    .description = "Replaces the Anxiety OD pedal's DSP with a Neural Amp Modeler player.",
+    .id = NAM_MOD_NAM_PEDALS,
+    .key = "nam-pedals",
+    .title = "Add the NAM pedals (\"NAM\", \"NAM TWO\": four per rig)",
+    .description = "Adds two new pedals to the Distortion list that play Neural Amp Modeler models. Nothing stock "
+                   "is changed.",
+    .models = {"pedalboard"},
+    .requires = NAM_MOD_COUNT,
+  },
+  {
+    .id = NAM_MOD_ANXIETY,
+    .key = "anxiety-hijack",
+    .title = "Make Anxiety OD run NAM (up to 2 instances)",
+    .description = "Replaces the Anxiety OD pedal's DSP with a Neural Amp Modeler player. On the Pedalboard, this "
+                   "keeps pedalboards built with the older version of this mod working.",
     .models = {"pedalboard", "mx5", "gigboard"},
     .requires = NAM_MOD_COUNT,
   },
   {
-    .id = NAM_MOD_NAM_4X,
-    .key = "nam-4x",
-    .title = "Also use Anxiety OD V2 for NAM (up to 4 instances)",
-    .description = "Hijacks Anxiety OD V2 the same way, for up to 4 NAM instances per rig.",
+    .id = NAM_MOD_ANXIETY_V2,
+    .key = "anxiety-v2",
+    .title = "Also make Anxiety OD V2 run NAM (up to 4 instances)",
+    .description = "Hijacks Anxiety OD V2 the same way, for up to 4 hijacked instances per rig.",
     .models = {"pedalboard", "mx5", "gigboard"},
-    .requires = NAM_MOD_NAM,
+    .requires = NAM_MOD_ANXIETY,
+  },
+  {
+    .id = NAM_MOD_PAGE_PEDAL,
+    .key = "page-pedal",
+    .title = "Footswitch page-turner (FS5/FS11 -> USB Page Down/Up)",
+    .description = "Two footswitches act as a USB keyboard's Page Up/Page Down for the connected computer, e.g. "
+                   "to turn sheet-music pages. See docs/PAGE_PEDAL.md.",
+    .models = {"pedalboard"},
+    .requires = NAM_MOD_COUNT,
   },
   {
     .id = NAM_MOD_USB_CONSOLE,
@@ -63,11 +84,14 @@ static void set_err(char* err, size_t err_size, const char* fmt, ...)
   va_end(ap);
 }
 
-NamModSelection nam_mods_default(void)
+NamModSelection nam_mods_default(const char* model_name)
 {
   NamModSelection sel;
   memset(&sel, 0, sizeof(sel));
-  sel.enabled[NAM_MOD_NAM] = true;
+  if (model_name && nam_mod_supports_model(&NAM_MODS[NAM_MOD_NAM_PEDALS], model_name))
+    sel.enabled[NAM_MOD_NAM_PEDALS] = true;
+  else
+    sel.enabled[NAM_MOD_ANXIETY] = true;
   return sel;
 }
 

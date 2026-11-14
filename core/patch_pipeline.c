@@ -6,8 +6,10 @@
 #include "ext4_image.h"
 #include "fit_image.h"
 #include "launcher_script.h"
+#include "spy_patch.h"
 #include "model_targets.h"
 #include "nam_blobs_embedded.h"
+#include "page_pedal.h"
 #include "qml_patch.h"
 #include "xz_codec.h"
 
@@ -91,12 +93,20 @@ static bool write_whole_file(const char* path, const uint8_t* data, size_t len, 
 }
 
 bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, const char* model_name,
-                         const NamModSelection* mods, const char* workdir, NamProgressFn progress,
+                         const NamPatchOptions* opts, const char* workdir, NamProgressFn progress,
                          void* progress_user_data, uint8_t** out_img_data, size_t* out_img_len, char* err,
                          size_t err_size)
 {
   *out_img_data = NULL;
   *out_img_len = 0;
+  const NamModSelection* mods = &opts->mods;
+  const bool nam_pedals = mods->enabled[NAM_MOD_NAM_PEDALS];
+  const bool anxiety_hijack = mods->enabled[NAM_MOD_ANXIETY];
+  const bool enable_v2_hijack = anxiety_hijack && mods->enabled[NAM_MOD_ANXIETY_V2];
+  const bool enable_page_pedal = mods->enabled[NAM_MOD_PAGE_PEDAL];
+  const bool want_nam = nam_pedals || anxiety_hijack;
+  /* the NAM modes and the page-turner both edit Evil's launcher script */
+  const bool want_launcher = want_nam || enable_page_pedal;
 
   FitProps props = {0};
   FitProps verify_props = {0};
@@ -143,9 +153,9 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   else
     report(progress, progress_user_data, "OK  model target: %s", target->name);
 
+  /* also enforces the Pedalboard-only mods (NAM pedals, page-turner): see the model lists in mods.c */
   if (!nam_mods_validate(mods, target->name, err, err_size))
     goto cleanup;
-  const bool want_nam = mods->enabled[NAM_MOD_NAM];
   report(progress, progress_user_data, "OK  mods selected: %s", nam_mods_selection_str(mods));
 
   uint32_t splash_off, splash_len, recov_off, recov_len, rootfs_off, rootfs_len;
@@ -184,7 +194,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
    * selection of only rootfs-level mods leaves the stock binary untouched. */
   bool evil_modified = false;
 
-  if (want_nam)
+  if (want_launcher)
   {
     size_t script_len;
     if (!nam_ext4_dump(img, "/usr/Evil/Scripts/evil", &script_data_raw, &script_len, err, err_size))
@@ -199,54 +209,91 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     script_data[script_len] = '\0';
     free(script_data_raw);
     script_data_raw = NULL;
+  }
 
-    const uint8_t* tramp = g_nam_trampoline_gonk_bin;
-    size_t tramp_len = (size_t)g_nam_trampoline_gonk_bin_len;
-    if (tramp_len != 32)
-    {
-      set_err(err, err_size, "embedded trampoline_gonk.bin is %zu bytes, expected exactly 32", tramp_len);
-      goto cleanup;
-    }
-
-    ElfPatchResult elf_result;
-    if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
-                                   &elf_result, err, err_size))
-      goto cleanup;
-    report(progress, progress_user_data, "OK  ELF hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
-           elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
-
-    ElfPatchResult elf_result_v2;
+  if (want_nam)
+  {
+    ElfPatchResult elf_result = {0};
+    ElfPatchResult elf_result_v2 = {0};
     bool has_v2_hijack = false;
-    if (mods->enabled[NAM_MOD_NAM_4X])
+    uint32_t eng_hook_slot = 0, eng_init_slot = 0, eng_tab = 0;
+
+    if (anxiety_hijack)
     {
-      if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
-                                     target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+      const uint8_t* tramp = g_nam_trampoline_gonk_bin;
+      size_t tramp_len = (size_t)g_nam_trampoline_gonk_bin_len;
+      if (tramp_len != 32)
+      {
+        set_err(err, err_size, "embedded trampoline_gonk.bin is %zu bytes, expected exactly 32", tramp_len);
         goto cleanup;
-      has_v2_hijack = true;
-      report(progress, progress_user_data,
-             "OK  ELF hijack patched (Anxiety OD V2): trampoline @ 0x%x, hook_slot @ 0x%x",
-             elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
+      }
+
+      if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->engine_vtable_vaddr, target->orig_process_fn,
+                                     &elf_result, err, err_size))
+        goto cleanup;
+      report(progress, progress_user_data, "OK  Anxiety OD hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
+             elf_result.trampoline_vaddr, elf_result.hook_slot_addr);
+
+      if (enable_v2_hijack)
+      {
+        if (!nam_elf_patch_gonkulator(evil_data, evil_len, tramp, target->v2_engine_vtable_vaddr,
+                                       target->v2_orig_process_fn, &elf_result_v2, err, err_size))
+          goto cleanup;
+        has_v2_hijack = true;
+        report(progress, progress_user_data, "OK  Anxiety OD V2 hijack patched: trampoline @ 0x%x, hook_slot @ 0x%x",
+               elf_result_v2.trampoline_vaddr, elf_result_v2.hook_slot_addr);
+      }
+
+      if (target->qml_rename_count > 0)
+      {
+        if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
+          goto cleanup;
+        report(progress, progress_user_data, "OK  QML knob labels relabeled");
+      }
+      else
+      {
+        report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
+               target->name);
+      }
     }
 
-    if (target->qml_rename_count > 0)
+    if (nam_pedals)
     {
-      if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
+      /* the registry patch parks tables in the zero slack after the R+W segment, which is the very end of the file */
+      uint8_t* grown = (uint8_t*)realloc(evil_data, evil_len + 4096);
+      if (!grown)
+      {
+        set_err(err, err_size, "out of memory growing Evil");
         goto cleanup;
-      report(progress, progress_user_data, "OK  QML knob labels relabeled");
-    }
-    else
-    {
-      report(progress, progress_user_data, "    (QML knob relabel skipped for %s -- no per-pedal target)",
-             target->name);
+      }
+      memset(grown + evil_len, 0, 4096);
+      evil_data = grown;
+      evil_len += 4096;
+      /* two registry pairs = two picker entries, each addable twice: four NAM pedals per rig */
+      const NamPair pairs[2] = {{"NAM", "NAM", NAM_ENGINE_TYPE, 0}, {"NAM TWO", "NAM TWO", NAM_ENGINE_TYPE, 0}};
+      if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 2, err, err_size)
+          || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 2, &eng_init_slot, &eng_tab, err, err_size)
+          || !nam_elf_patch_engine_class(evil_data, evil_len, 4, eng_tab, &eng_hook_slot, err, err_size))
+        goto cleanup;
+      report(progress, progress_user_data,
+             "OK  NAM pedals registered: \"NAM\" and \"NAM TWO\" (2 instances each), engine hook_slot @ 0x%x",
+             eng_hook_slot);
     }
     evil_modified = true;
 
     char hook_slot_hex[32];
     snprintf(hook_slot_hex, sizeof(hook_slot_hex), "0x%x", elf_result.hook_slot_addr);
+    char hook_slot_eng_hex[32];
+    snprintf(hook_slot_eng_hex, sizeof(hook_slot_eng_hex), "0x%x", eng_hook_slot);
+    char eng_init_hex[32], eng_tab_hex[32];
+    snprintf(eng_init_hex, sizeof(eng_init_hex), "0x%x", eng_init_slot);
+    snprintf(eng_tab_hex, sizeof(eng_tab_hex), "0x%x", eng_tab);
     char hook_slot_v2_hex[32];
     if (has_v2_hijack)
       snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
-    if (!nam_build_launcher_script(script_data, hook_slot_hex, has_v2_hijack ? hook_slot_v2_hex : NULL, &new_script,
+    if (!nam_build_launcher_script(script_data, anxiety_hijack ? hook_slot_hex : NULL,
+                                    has_v2_hijack ? hook_slot_v2_hex : NULL, nam_pedals ? hook_slot_eng_hex : NULL,
+                                    nam_pedals ? eng_init_hex : NULL, nam_pedals ? eng_tab_hex : NULL, &new_script,
                                     err, err_size))
       goto cleanup;
     free(script_data);
@@ -258,10 +305,38 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     if (!nam_ext4_inject(img, "/usr/Evil/libnam_preload.so", g_nam_preload_so, (size_t)g_nam_preload_so_len, 0755,
                           err, err_size))
       goto cleanup;
+    report(progress, progress_user_data, "OK  injected libnam_hook.so, libnam_preload.so");
+  }
+  else if (want_launcher)
+  {
+    /* no NAM: the page-turner block goes into the stock launcher script */
+    new_script = script_data;
+    script_data = NULL;
+  }
+
+  if (enable_page_pedal)
+  {
+    char* with_pp = NULL;
+    if (!nam_launcher_add_page_pedal(new_script, &with_pp, err, err_size))
+      goto cleanup;
+    free(new_script);
+    new_script = with_pp;
+    const int page_down = opts->page_notes_set ? opts->page_down_note : NAM_PAGE_DOWN_NOTE_DEFAULT;
+    const int page_up = opts->page_notes_set ? opts->page_up_note : NAM_PAGE_UP_NOTE_DEFAULT;
+    if (!nam_page_pedal_install(img, g_pagepedal_bin, (size_t)g_pagepedal_bin_len, page_down, page_up, err, err_size))
+      goto cleanup;
+    report(progress, progress_user_data,
+           "OK  page-turner installed: /usr/Evil/pagepedal, pagepedal-usb.sh, USB mode scripts patched, switches FS%d (Page "
+           "Down) and FS%d (Page Up) coloured and labelled",
+           page_down + 1, page_up + 1);
+  }
+
+  if (want_launcher)
+  {
     if (!nam_ext4_inject(img, "/usr/Evil/Scripts/evil", (const uint8_t*)new_script, strlen(new_script), 0755, err,
                           err_size))
       goto cleanup;
-    report(progress, progress_user_data, "OK  injected libnam_hook.so, libnam_preload.so, launcher script");
+    report(progress, progress_user_data, "OK  injected launcher script");
   }
 
   if (mods->enabled[NAM_MOD_TUNER_TEMPO])

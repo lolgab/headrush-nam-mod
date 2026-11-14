@@ -14,4 +14,11 @@ extern const unsigned long g_nam_preload_so_len;
 extern const unsigned char g_nam_trampoline_gonk_bin[];
 extern const unsigned long g_nam_trampoline_gonk_bin_len;
 
+extern const unsigned char g_pagepedal_bin[];
+extern const unsigned long g_pagepedal_bin_len;
+
+/* patch/pagepedal-usb.sh (source file, embedded verbatim) */
+extern const unsigned char g_pagepedal_usb_sh[];
+extern const unsigned long g_pagepedal_usb_sh_len;
+
 #endif

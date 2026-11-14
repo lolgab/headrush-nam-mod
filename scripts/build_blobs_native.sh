@@ -41,6 +41,12 @@ mkdir -p "$WORK"
 "$AS" -mfpu=neon-vfpv4 -mfloat-abi=hard patch/trampoline_gonk.S -o "$WORK"/trampoline_gonk.o
 "$OBJCOPY" -O binary "$WORK"/trampoline_gonk.o "$WORK"/trampoline_gonk.bin
 
+# Footswitch page-turner daemon (plain C, kernel UAPI headers only -- no libasound)
+"$CC" -std=gnu11 -O2 -Wall -Wextra -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
+    patch/pagepedal.c -o "$WORK"/pagepedal.unstripped
+"$STRIP" --strip-unneeded -o "$WORK"/pagepedal.bin "$WORK"/pagepedal.unstripped
+rm -f "$WORK"/pagepedal.unstripped
+
 # remote-screen mod (mods/remote_screen/). Plain C, glibc only; same flags
 # as that mod's own dev-loop build.sh.
 "$CC" -O2 -Wall -Wextra -Wno-unused-parameter \
@@ -52,4 +58,4 @@ mkdir -p "$WORK"
 rm -f "$WORK"/libnam_hook.unstripped.so "$WORK"/libnam_preload.unstripped.so "$WORK"/trampoline_gonk.o \
     "$WORK"/mx5_screen_server.unstripped
 
-echo "OK  wrote $WORK/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,mx5_screen_server}"
+echo "OK  wrote $WORK/{libnam_hook.so,libnam_preload.so,trampoline_gonk.bin,pagepedal.bin,mx5_screen_server}"

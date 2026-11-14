@@ -1,5 +1,12 @@
 # Technical design: the Anxiety OD hijack
 
+> This is the **opt-in, older** design (the installer's "Also make Anxiety OD
+> run NAM" option; the only mode on MX5 and Gigboard). The default on the
+> Pedalboard is two new pedals, **NAM** and **NAM TWO** (two instances each), that replace nothing:
+> see [ADDITIVE_PEDAL.md](ADDITIVE_PEDAL.md) and
+> [NAM_PEDAL_DISPLAY.md](NAM_PEDAL_DISPLAY.md). Both can be installed together;
+> they patch different parts of `Evil` and share `libnam_hook.so`.
+
 Takes a stock HeadRush Pedalboard, MX5, or Gigboard firmware update file (`Update.img`)
 and produces a modified one that hijacks the **Anxiety OD (v1)** pedal's
 `process()` function, replacing its overdrive DSP with NAM inference. The
@@ -24,6 +31,35 @@ sacrificial pedal); only the absolute addresses differ, re-derived from each
 `Evil` the way `patch/patch_gonkulator.py`'s docstring documents. On-screen
 knob labels stay stock **Drive / Tone / Level** on all three devices.
 
+## CPU budget (how many NAMs can run)
+
+The audio callback runs 48 frames per block, so one block is **1000 us** for
+everything on the board. Measured on the Pedalboard with the NAM pedals:
+
+- A2 (slimmable) models have only **two sizes**, whatever ratio is requested:
+  about **680 us** per channel for the large one and about **104 us** for the
+  small one. Calibration picks the largest that fits a per-instance budget
+  (`1000 us / running instances`, with a 50% safety margin) and in practice
+  always lands on the small one.
+- Each instance runs one model per channel. Run as two channels, an instance
+  costs ~250 us per block, so **three active NAMs (~780 us) overran** while two
+  (~520 us) did not; the symptom was crackle until a scene deactivated one.
+- **Dual mono**: a guitar is normally the same signal on both channels, so when
+  the two input buffers are bit-identical the model runs once and its output is
+  copied (about halving the cost). `dsp[1]` is left idle meanwhile and is run
+  again from its stale state if the channels ever differ (a stereo effect before
+  the pedal), at worst a short transient. A true-stereo input still costs double.
+- The calibration benchmark times one channel and multiplies by two (the
+  conservative case). The instance count that divides the budget only counts
+  engines whose `process()` ran in the last 200 ms; slots are never released, so
+  engines of a rig that was left used to count forever and starved the budget.
+- No I/O on the audio thread: it only bumps counters (`ModelState::cpu_*`,
+  calibration state) and the watcher thread prints them (`[nam_cpu]`,
+  `[nam_cal]`, `[nam_load]`, `[nam_eng]` in the journal). A `fprintf` to the
+  journal from the audio thread can block it, which is an audible dropout.
+- The display watcher's heap sweep runs on engine changes and otherwise every
+  ~8 s, not every second.
+
 ## Knob implementation
 
 Anxiety OD's on-screen labels stay stock (**Drive / Tone / Level**) on every
@@ -34,7 +70,17 @@ device, but do this instead:
 | Drive | selects/scans `.nam` model files |
 | Tone | input trim |
 | Level | output trim |
-| Hi-Lo | doesn't do anything |
+| Hi-Lo | input calibration + output loudness normalization on/off (off by default) |
+
+With Hi-Lo on, the input is scaled by `interface_dBu - model_input_level_dBu` (the NAM plugin's rule), using the
+`input_level_dbu` stored in the `.nam` metadata; models without it are untouched. The interface level defaults to
+12.2 dBu (`NAM_CAL_DBU` overrides) and the boost/cut is capped at +-24 dB. Tone still trims on top. The output is also normalized: gain is `-18 dB - model_loudness_dB` (`loudness` in the
+`.nam` metadata; `NAM_CAL_LOUDNESS_DB` overrides the target, same ±24 dB cap, models without it untouched), with Level
+trim on top. The NAM pedals have the same
+calibration: their equivalent of the Hi-Lo switch is the stock **Gain Low/High** switch, **High = on**, off by default.
+**Verified on hardware:** on the NAM pedals the switch is the low byte of the word at engine offset `0x57c` (the word
+reads `0x00010000` off and `0x00010001` on, other flags share it, so the byte is tested, not the whole word). **Unverified
+on hardware:** the Anxiety OD offset (`0x55c`; `NAM_HILO_OFFSET` overrides either) and the 12.2 dBu reference.
 
 The Model knob has a fixed 101 positions (0%-100%, one per whole percent).
 Each position selects one `.nam` file, in alphabetical order, starting at 0%:
@@ -94,8 +140,8 @@ deadline -- same mechanism as
 
 By default the build only hijacks Anxiety OD (v1), which the stock firmware's
 block-add menu allows up to twice per board -- 2 NAM instances max. The GUI's
-"Also use Anxiety OD V2 for NAM (up to 4 instances)" mod (the CLI's
-`--mods nam,nam-4x`, or `--instances 4`) also
+"Also make Anxiety OD V2 run NAM (up to 4 instances)" mod (the CLI's
+`--mods anxiety-hijack,anxiety-v2`, or `--instances 4`) also
 hijacks **Anxiety OD V2** (internal class `AnxietyV2`), a separate,
 sibling pedal type also addable up to twice, for up to 4 total.
 
@@ -200,11 +246,19 @@ firmware's own UI).
 - `nam_core/` — [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore)
   (MIT license), fetched by `scripts/fetch_nam_core.sh` (not committed to
   this repo, not a git submodule).
+- `core/spy_patch.c`, `patch/engine_stub.S`, `patch/test_nam_eng.c`,
+  `tools/modfac_spy_cli.c` — the NAM pedals (registry, picker and node hooks,
+  own audio engine) and the observation tools used to find them. See
+  [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md).
 - `patch/patch_namloader.py`, `patch/patch_modfac_spy.py`,
   `patch/trampoline_naml.S`, `patch/trampoline_trim.S`,
-  `patch/case92_stub.S`, `patch/test_nam_naml_e2e.c` — the additive
-  (non-hijacking) pedal design and its supporting dispatch-tracing tool.
-  Not invoked by the build. See [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md).
+  `patch/case92_stub.S`, `patch/test_nam_naml_e2e.c` — the first, static
+  design for an additive pedal (never reachable). Kept as history; not
+  invoked by the build.
+
+- `patch/pagepedal.c`, `patch/pagepedal-usb.sh`, `core/page_pedal.c` — the
+  optional footswitch page-turner (USB keyboard) mod. See
+  [`PAGE_PEDAL.md`](PAGE_PEDAL.md).
 
 See [`BUILDING.md`](BUILDING.md) for the GUI/CLI build itself (`core/`,
 `app/`, `tools/`, `scripts/`).

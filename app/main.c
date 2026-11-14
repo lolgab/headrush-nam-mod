@@ -31,6 +31,7 @@
 #include "mods.h"
 #include "nam_library.h"
 #include "patch_pipeline.h"
+#include "stock_cache.h"
 #include "tempdir.h"
 #include "zip_reader.h"
 
@@ -359,22 +360,58 @@ static void nam_reveal_path(const char* path)
 #endif
 }
 
+#if defined(_WIN32)
+#define NAM_CACHE_PLATFORM "win"
+#elif defined(__APPLE__)
+#define NAM_CACHE_PLATFORM "mac"
+#else
+#define NAM_CACHE_PLATFORM "linux"
+#endif
+
+/* The downloaded zip is kept for the next run (see core/stock_cache.h) once its content proved usable; a cached
+ * zip that turns out unusable is dropped so the next run downloads afresh. Frees the zip. */
+static void finish_zip(AppShared* shared, bool from_cache, const char* key, const char* url, uint8_t* zip, size_t len,
+                       bool extract_ok)
+{
+  if (extract_ok && !from_cache)
+  {
+    char hex[65], cerr[256];
+    if (nam_stock_cache_store(key, url, zip, len, hex, cerr, sizeof(cerr)))
+    {
+      char msg[160];
+      snprintf(msg, sizeof(msg), "OK  kept the download for next time (sha256 %.12s...)", hex);
+      shared_push_log(shared, msg);
+    }
+    else
+    {
+      char msg[320];
+      snprintf(msg, sizeof(msg), "note: not cached (%s); the next run will download again", cerr);
+      shared_push_log(shared, msg);
+    }
+  }
+  else if (!extract_ok && from_cache)
+  {
+    nam_stock_cache_drop(key);
+    shared_push_log(shared, "note: the cached download was unusable and was removed; run again to download afresh");
+  }
+  free(zip);
+}
+
 static int worker_main(void* data)
 {
   AppShared* shared = (AppShared*)data;
 
   int model_index;
-  NamModSelection mods;
+  NamPatchOptions opts;
+  memset(&opts, 0, sizeof(opts)); /* page-turner footswitches: the defaults (FS11 / FS5) */
   SDL_LockMutex(shared->mutex);
   model_index = shared->selected_model;
-  mods = shared->mods;
+  opts.mods = shared->mods;
   shared->downloading = true;
   SDL_UnlockMutex(shared->mutex);
 
   const ModelTarget* target = &NAM_MODEL_TARGETS[model_index];
   char msg[256];
-  snprintf(msg, sizeof(msg), "Downloading stock %s firmware...", target->name);
-  shared_push_log(shared, msg);
 
   uint8_t* zip_data;
   size_t zip_len;
@@ -384,16 +421,37 @@ static int worker_main(void* data)
 #else
   const char* download_url = MAC_UPDATER_URLS[model_index];
 #endif
-  if (!nam_http_download(download_url, download_progress_cb, shared, &zip_data, &zip_len, err, sizeof(err)))
+  char cache_key[80];
+  snprintf(cache_key, sizeof(cache_key), "%s-%s", target->name, NAM_CACHE_PLATFORM);
+
+  /* reuse an earlier download if it is still byte-for-byte what was stored (the sha256 is checked on every use) */
+  bool from_cache = false;
   {
-    set_error(shared, err);
-    return 1;
+    char hex[65];
+    if (nam_stock_cache_load(cache_key, download_url, &zip_data, &zip_len, hex))
+    {
+      from_cache = true;
+      snprintf(msg, sizeof(msg), "OK  using the stock %s updater downloaded earlier (sha256 %.12s... verified)",
+               target->name, hex);
+      shared_push_log(shared, msg);
+    }
+  }
+
+  if (!from_cache)
+  {
+    snprintf(msg, sizeof(msg), "Downloading stock %s firmware...", target->name);
+    shared_push_log(shared, msg);
+    if (!nam_http_download(download_url, download_progress_cb, shared, &zip_data, &zip_len, err, sizeof(err)))
+    {
+      set_error(shared, err);
+      return 1;
+    }
+    shared_push_log(shared, "OK  downloaded stock firmware updater");
   }
 
   SDL_LockMutex(shared->mutex);
   shared->downloading = false;
   SDL_UnlockMutex(shared->mutex);
-  shared_push_log(shared, "OK  downloaded stock firmware updater");
 
   char workdir[NAM_TEMPDIR_MAX_PATH];
   char tempdir_err[256];
@@ -410,7 +468,7 @@ static int worker_main(void* data)
   char extract_dir[700];
   snprintf(extract_dir, sizeof(extract_dir), "%s/extracted", workdir);
   bool ok = nam_zip_extract_all(zip_data, zip_len, extract_dir, err, sizeof(err));
-  free(zip_data);
+  finish_zip(shared, from_cache, cache_key, download_url, zip_data, zip_len, ok);
   if (!ok)
   {
     set_error(shared, err);
@@ -457,7 +515,7 @@ static int worker_main(void* data)
   uint8_t* exe_data;
   size_t exe_len;
   bool ok = nam_zip_extract_by_suffix(zip_data, zip_len, ".exe", &exe_data, &exe_len, err, sizeof(err));
-  free(zip_data);
+  finish_zip(shared, from_cache, cache_key, download_url, zip_data, zip_len, ok);
   if (!ok)
   {
     set_error(shared, err);
@@ -483,7 +541,7 @@ static int worker_main(void* data)
   shared_push_log(shared, "OK  extracted Update.img from the stock updater .exe");
 #else
   bool ok = nam_zip_extract_by_suffix(zip_data, zip_len, "Update.img", &stock_img, &stock_img_len, err, sizeof(err));
-  free(zip_data);
+  finish_zip(shared, from_cache, cache_key, download_url, zip_data, zip_len, ok);
   if (!ok)
   {
     set_error(shared, err);
@@ -494,7 +552,7 @@ static int worker_main(void* data)
 
   uint8_t* out_data;
   size_t out_len;
-  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, &mods, workdir, progress_to_log, shared, &out_data,
+  ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, &opts, workdir, progress_to_log, shared, &out_data,
                           &out_len, err, sizeof(err));
   free(stock_img);
 
@@ -667,7 +725,8 @@ static void render_library_screen(struct nk_context* ctx, AppShared* shared, Lib
     nk_label(ctx, header, NK_TEXT_LEFT);
 
     nk_layout_row_dynamic(ctx, 28, 1);
-    nk_checkbox_label(ctx, "Generate Anxiety OD .block presets", &lib->generate_blocks);
+    nk_checkbox_label(ctx, "Generate Anxiety OD .block presets (only if you use the Anxiety OD option)",
+                        &lib->generate_blocks);
     if (lib->generate_blocks)
     {
       nk_layout_row_dynamic(ctx, 18, 1);
@@ -677,7 +736,7 @@ static void render_library_screen(struct nk_context* ctx, AppShared* shared, Lib
       nk_label(ctx, blocks_note, NK_TEXT_LEFT);
 
       nk_layout_row_dynamic(ctx, 28, 1);
-      nk_checkbox_label(ctx, "Also generate Anxiety OD V2 blocks (only if you used the \"up to 4 instances\" mod)",
+      nk_checkbox_label(ctx, "Also generate Anxiety OD V2 blocks (only with \"up to 4\")",
                           &lib->generate_v2_blocks);
 
       nk_layout_row_dynamic(ctx, 28, 1);
@@ -822,7 +881,7 @@ int main(int argc, char** argv)
   shared.mutex = SDL_CreateMutex();
   shared.state = APP_STATE_PICK;
   shared.selected_model = 0;
-  shared.mods = nam_mods_default();
+  shared.mods = nam_mods_default(NAM_MODEL_TARGETS[0].name);
 
   LibraryState lib;
   memset(&lib, 0, sizeof(lib));
@@ -857,12 +916,16 @@ int main(int argc, char** argv)
         nk_layout_row_dynamic(ctx, 24, 1);
         nk_label(ctx, "Downloads the official stock firmware and applies them -- no extra tools.", NK_TEXT_LEFT);
 
-        nk_layout_row_dynamic(ctx, 30, 1);
+        nk_layout_row_dynamic(ctx, 30, NAM_MODEL_COUNT);
         for (int i = 0; i < NAM_MODEL_COUNT; ++i)
         {
           int selected = (shared.selected_model == i);
           if (nk_option_label(ctx, NAM_MODEL_TARGETS[i].name, selected) && !selected)
+          {
             shared.selected_model = i;
+            /* the right NAM option differs per model (NAM pedals on the Pedalboard, Anxiety OD elsewhere) */
+            shared.mods = nam_mods_default(NAM_MODEL_TARGETS[i].name);
+          }
         }
 
         nk_layout_row_dynamic(ctx, 24, 1);
@@ -900,6 +963,7 @@ int main(int argc, char** argv)
             nk_widget_disable_end(ctx);
           any_selected = any_selected || shared.mods.enabled[i];
         }
+
 
         nk_layout_row_dynamic(ctx, 40, 1);
         if (!any_selected)

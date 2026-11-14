@@ -49,6 +49,8 @@
 // Model loading happens once, off the audio thread, on first process() call.
 // Until it completes, audio passes through dry (never silence, never garbage).
 
+#include <dlfcn.h>
+#include <cstdarg>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -65,7 +67,10 @@
 #include <pthread.h>
 #include <string>
 #include <sys/resource.h>
+#include <sys/uio.h>
 #include <type_traits>
+#include <map>
+#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 
@@ -254,6 +259,37 @@ float trim_gain(float raw01)
   return std::pow(10.0f, db / 20.0f);
 }
 
+// dB-scale trim for the additive NAM pedals: -Inf .. +12 dB over the fader's 0..1 range, 0 dB at the default
+// (0.5). Below center the gain falls linearly in dB down to -60 dB at the very bottom (a plain dB taper), and the
+// last few percent fade on to true silence, so the bottom of the travel is "-Inf".
+float trim_gain_db(float raw01)
+{
+  if (raw01 <= 0.0f)
+    return 0.0f;
+  float db;
+  float extra = 1.0f;
+  if (raw01 < 0.5f)
+  {
+    db = -60.0f * (1.0f - raw01 * 2.0f);
+    if (raw01 < 0.03f)
+      extra = raw01 / 0.03f;
+  }
+  else
+  {
+    db = (raw01 - 0.5f) * 2.0f * trim_max_db();
+  }
+  return extra * std::pow(10.0f, db / 20.0f);
+}
+
+// The FX-Loop's SEND/RETURN faders (-60..+12 dB, "%.1f dB") -- what the additive NAM pedals' Level/Tone show once
+// their translators were cloned from those (nam_eng_init): dB is linear in the fader position.
+float trim_gain_fx(float raw01)
+{
+  if (raw01 <= 0.004f)
+    return 0.0f;
+  return std::pow(10.0f, (-60.0f + 72.0f * std::min(raw01, 1.0f)) / 20.0f);
+}
+
 // Every *.nam file under model_dir() is read and JSON-parsed exactly ONCE,
 // the first time Anxiety OD is actually engaged, and kept in memory for the
 // rest of the boot -- model switching after that never touches the
@@ -421,6 +457,14 @@ constexpr int kMaxChannels = 2;
 
 struct ModelState
 {
+  std::atomic<int> cal_state{-1}; // last Hi-Lo / Gain state seen (for the log line on a change)
+  // audio-callback cost of this instance (diagnostics: crackle = blocks over the 1 ms deadline). The audio thread only
+  // bumps these counters; the watcher thread prints and resets them -- no I/O ever happens on the audio thread, a
+  // stderr write to the journal can block it for ~50 ms, an audible dropout.
+  std::atomic<int64_t> last_call_ms{0}; // when process() last ran: engines of a rig that is not loaded stop counting
+  std::atomic<uint64_t> cpu_sum_ns{0};
+  std::atomic<uint32_t> cpu_max_us{0}, cpu_n{0}, cpu_over{0};
+  std::atomic<float> last_model{0}, last_in{0}, last_out{0};
   // One independent nam::DSP instance per channel -- NAM models carry
   // internal state (WaveNet hidden state, history ring buffers), so feeding
   // L then R through a single shared instance would corrupt both channels'
@@ -484,6 +528,14 @@ struct ModelState
 
   // Which engine object (this_) this slot belongs to -- see state_for().
   std::atomic<void*> owner_this{nullptr};
+
+  // Diagnostics (additive NAM pedals): process() calls seen, for the journal heartbeat in nam_process_common.
+  std::atomic<uint32_t> calls{0};
+
+  // Additive NAM pedals: set once the Level/Tone faders' translators were cloned from the FX-Loop's dB ones, so the
+  // trim gain must follow that display's curve (see trim_gain_fx).
+  std::atomic<bool> disp_db{false};
+  std::atomic<bool> is_eng{false};
 };
 
 // Anxiety OD's process() is hijacked on the SHARED CLASS VTABLE -- every
@@ -648,9 +700,13 @@ constexpr double kCalibrationSafetyMargin = 0.5;
 // already exist.
 int count_claimed_instances()
 {
+  // Slots are never released, so an engine of a rig that was left would count forever: only instances whose process()
+  // ran within the last 200 ms share the audio callback's budget right now. (Bypassed pedals still run process().)
+  const int64_t now = now_ms();
   int n = 0;
   for (auto& inst : g_instances)
-    if (inst.owner_this.load(std::memory_order_acquire) != nullptr)
+    if (inst.owner_this.load(std::memory_order_acquire) != nullptr
+        && now - inst.last_call_ms.load(std::memory_order_relaxed) < 200)
       ++n;
   return n;
 }
@@ -674,6 +730,8 @@ double calibrate_slimmable_quality(nam::DSP& dsp, nam::SlimmableModel& slimmable
   float* in_arr[1] = {test_signal.data()};
   float* out_arr[1] = {scratch.data()};
 
+  // The ratio is NOT continuous: the model only has the sizes between its breakpoints (A2 models: two, "Lite" and
+  // "Full"). Measured on hardware per channel: ~680 us for the large size, ~104 us for the small one.
   for (size_t tier = num_tiers; tier-- > 0;) // highest quality first
   {
     const double ratio = (static_cast<double>(tier) + 0.5) / static_cast<double>(num_tiers);
@@ -688,9 +746,15 @@ double calibrate_slimmable_quality(nam::DSP& dsp, nam::SlimmableModel& slimmable
                              std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count())
                            / static_cast<double>(kCalibrationIters);
 
-    if (avg_us < budget_us * kCalibrationSafetyMargin)
+    // the benchmark runs ONE channel's model; instances normally run one (dual-mono input, see nam_process_common) but
+    // two when the input is true stereo, so the conservative cost is avg_us * kMaxChannels
+    std::fprintf(stderr, "[nam_cal] instances=%d budget=%.0fus tier=%zu/%zu ratio=%.2f avg=%.0fus x%d channels need<%.0fus\n",
+                 concurrent_instances, budget_us, tier, num_tiers, ratio, avg_us, static_cast<int>(kMaxChannels),
+                 budget_us * kCalibrationSafetyMargin);
+    if (avg_us * kMaxChannels < budget_us * kCalibrationSafetyMargin)
       return ratio;
   }
+  std::fprintf(stderr, "[nam_cal] nothing fit the budget: falling back to the minimum tier\n");
   return 0.0; // nothing fit safely -- fall back to minimum/Lite
 }
 
@@ -820,6 +884,8 @@ void switch_model_in_background(ModelState& s, float raw, bool force_reload_same
             else
               slimmable->SetSlimmableSize(entry.ratio);
             chosen_ratio = entry.ratio;
+            std::fprintf(stderr, "[nam_load] model %d tier=%.2f instances=%d epoch=%d\n", idx, chosen_ratio,
+                         count_claimed_instances(), live_epoch);
           }
           else
             slimmable->SetSlimmableSize(chosen_ratio);
@@ -1012,8 +1078,96 @@ float raised_cosine_ramp(int32_t progress, int32_t len)
   return 0.5f * (1.0f - std::cos(static_cast<float>(M_PI) * x));
 }
 
+// Where the three knobs and the bypass byte live inside the hijacked engine object, plus how the trims are
+// curved. Anxiety OD's and the additive NAM pedals' engines (a Glorious Drive clone) have the same shape at
+// different offsets.
+struct KnobLayout
+{
+  uint32_t model, input, output, bypass, hilo;
+  bool db_trim;
+};
+
+// Hi-Lo switch = input calibration + output loudness normalization on/off (GitHub issue #20). When on, the input is scaled so the model's own
+// calibrated input level (nam::DSP::GetInputLevel(), dBu at 0 dBFS in the training capture) lines up with the
+// interface's level -- the same rule the NAM plugin uses: gain_dB = interface_dBu - model_dBu. Models without an
+// input level in their metadata are left alone. The Hi-Lo field's offset (one 0x14 slot after Tone, like Drive/Tone/
+// Level) is NOT hardware-verified for Anxiety OD; on the additive NAM pedals it is (their "Gain" Low/High switch is the
+// byte at 0x57c, 0 = Low, 1 = High = calibration on). NAM_HILO_OFFSET overrides it, the heartbeat log prints the raw word.
+float calibration_interface_dbu()
+{
+  if (const char* env = std::getenv("NAM_CAL_DBU"))
+    return std::strtof(env, nullptr);
+  return 12.2f; // NAM plugin default
+}
+
+float calibration_max_db()
+{
+  return 24.0f; // keep a bogus metadata value from turning into a wall of noise
+}
+
+// The switch is a two-state enum: its low byte is 0 / 1, and other flags share the same word (the additive pedals read
+// 0x00010000 off and 0x00010001 on), so the byte is tested, not the whole word. A float 1.0f is accepted too.
+bool hilo_is_on(const void* this_, uint32_t offset)
+{
+  if (const char* env = std::getenv("NAM_HILO_OFFSET"))
+    offset = static_cast<uint32_t>(std::strtoul(env, nullptr, 0));
+  uint32_t word;
+  std::memcpy(&word, static_cast<const uint8_t*>(this_) + offset, sizeof word);
+  float f;
+  std::memcpy(&f, &word, sizeof f);
+  return (word & 0xffu) == 1u || (std::isfinite(f) && f > 0.5f && f < 1.5f);
+}
+
+// Output side of the same switch: normalize the model's own loudness (GetLoudness(), dB) to a common target so
+// switching models keeps roughly the same volume. Same rule as the NAM plugin (target -18 dB).
+float calibration_target_loudness_db()
+{
+  if (const char* env = std::getenv("NAM_CAL_LOUDNESS_DB"))
+    return std::strtof(env, nullptr);
+  return -18.0f;
+}
+
+float calibration_output_gain(nam::DSP* dsp)
+{
+  if (!dsp || !dsp->HasLoudness())
+    return 1.0f;
+  const float db = std::clamp(calibration_target_loudness_db() - static_cast<float>(dsp->GetLoudness()),
+                              -calibration_max_db(), calibration_max_db());
+  return std::pow(10.0f, db / 20.0f);
+}
+
+float calibration_gain(nam::DSP* dsp)
+{
+  if (!dsp || !dsp->HasInputLevel())
+    return 1.0f;
+  const float db = std::clamp(calibration_interface_dbu() - static_cast<float>(dsp->GetInputLevel()),
+                              -calibration_max_db(), calibration_max_db());
+  return std::pow(10.0f, db / 20.0f);
+}
+
+static void nam_process_common(void* this_, float** input, uint32_t numChannels, float** output, int32_t numFrames,
+                               const KnobLayout& kl);
+
 extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
                                   float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
+{
+  static const KnobLayout kAnxiety = {0x534, 0x548, 0x520, 0x26b, 0x55c, false};
+  nam_process_common(this_, input, numChannels, output, numFrames, kAnxiety);
+}
+
+// The additive NAM pedals (see core/spy_patch.h): their engine is a Glorious Drive clone whose three 0..1 knobs
+// sit at +0x540 (Level = input), +0x554 (Drive = model) and +0x568 (Tone = output) -- the editor lists Level before
+// Tone, so the input comes first; the engine floats themselves are confirmed on hardware:
+// the engine creates them in Level, Drive, Tone order, like Anxiety OD's.
+extern "C" void nam_process_eng(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
+                                 float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
+{
+  static const KnobLayout kEng = {0x554, 0x540, 0x568, 0x26b, 0x57c, true}; // model, input, output
+  nam_process_common(this_, input, numChannels, output, numFrames, kEng);
+}
+
+static void nam_process_common(void* this_, float** input, uint32_t numChannels, float** output, int32_t numFrames,
+                               const KnobLayout& kl)
 {
   flush_denormals_to_zero(); // see its own comment -- Evil's real-time audio
                               // thread, not one we spawned ourselves
@@ -1023,13 +1177,52 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
     numChannels = kMaxChannels;
 
   auto& s = state_for(this_); // per-engine-instance state -- see its own comment
+  struct CpuTimer
+  {
+    ModelState& st;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    ~CpuTimer()
+    {
+      const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+      const uint32_t us = static_cast<uint32_t>(ns / 1000);
+      st.cpu_sum_ns.fetch_add(static_cast<uint64_t>(ns), std::memory_order_relaxed);
+      if (us > st.cpu_max_us.load(std::memory_order_relaxed))
+        st.cpu_max_us.store(us, std::memory_order_relaxed);
+      st.cpu_n.fetch_add(1, std::memory_order_relaxed);
+      if (us > 800) // 48 frames at 48 kHz = 1000 us per block, shared by every instance
+        st.cpu_over.fetch_add(1, std::memory_order_relaxed);
+    }
+  } cpu_timer{s};
+  s.last_call_ms.store(now_ms(), std::memory_order_relaxed);
+  {
+    // Heartbeat to the journal: the first call, then roughly every 16 s of audio. Temporary bring-up diagnostics for
+    // the additive NAM pedals (is the hook reached at all, with which knob values, is a model active?).
+    const uint32_t n = s.calls.fetch_add(1, std::memory_order_relaxed);
+    if (kl.db_trim && n == 0)
+      s.is_eng.store(true, std::memory_order_relaxed);
+    if (kl.db_trim)
+    {
+      const uint8_t* b = reinterpret_cast<const uint8_t*>(this_);
+      s.last_model.store(*reinterpret_cast<const float*>(b + kl.model), std::memory_order_relaxed);
+      s.last_in.store(*reinterpret_cast<const float*>(b + kl.input), std::memory_order_relaxed);
+      s.last_out.store(*reinterpret_cast<const float*>(b + kl.output), std::memory_order_relaxed);
+    }
+  }
   const int32_t kFadeOutLenSamples = fade_out_len_samples();
   const int32_t kFadeInLenSamples = fade_in_len_samples();
 
-  const float drive_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x534); // model select
-  const float tone_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x548);   // input trim
-  const float level_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + 0x520);  // output trim
-  const uint8_t bypass_byte = *(reinterpret_cast<uint8_t*>(this_) + 0x26b);
+  float drive_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + kl.model); // model select
+  if (kl.db_trim && g_models_ready.load(std::memory_order_acquire) && !g_cached_models.empty())
+  {
+    // Additive pedals: the knob reads as the file number 1..n (nearest step, the same rounding the editor uses for the
+    // number it shows and that the name below it uses); the stepping code below only sees the zone's whole-percent position.
+    const int n = static_cast<int>(g_cached_models.size());
+    const int zone = std::clamp(static_cast<int>(std::lround(std::clamp(drive_raw, 0.0f, 1.0f) * static_cast<float>(n - 1))), 0, n - 1);
+    drive_raw = static_cast<float>(zone) / static_cast<float>(kKnobSteps - 1);
+  }
+  const float tone_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + kl.input);   // input trim
+  const float level_raw = *reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(this_) + kl.output); // output trim
+  const uint8_t bypass_byte = *(reinterpret_cast<uint8_t*>(this_) + kl.bypass);
 
   // Bypass is checked further down now, right before the first place it
   // actually needs to change behavior (the produced audio) -- NOT here.
@@ -1217,8 +1410,19 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
 
   // Tone/Level are [0,1] with 0.5=center/unity, 0.0=silence -- trim_gain()
   // takes that range directly.
-  const float in_gain = trim_gain(tone_raw);
-  const float out_gain = trim_gain(level_raw);
+  const bool fx_curve = kl.db_trim && s.disp_db.load(std::memory_order_relaxed);
+  float in_gain = fx_curve ? trim_gain_fx(tone_raw) : kl.db_trim ? trim_gain_db(tone_raw) : trim_gain(tone_raw);
+  float out_gain = fx_curve ? trim_gain_fx(level_raw) : kl.db_trim ? trim_gain_db(level_raw) : trim_gain(level_raw);
+  // dsp[0] is non-null whenever a real model is active (see silent_active below); the model is only swapped while
+  // faded out / muted, so reading its metadata here is safe.
+  const bool cal_on = hilo_is_on(this_, kl.hilo);
+  if (kl.db_trim)
+    s.cal_state.store(static_cast<int>(cal_on), std::memory_order_relaxed); // printed by the watcher thread
+  if (s.active_index.load(std::memory_order_relaxed) >= 0 && cal_on)
+  {
+    in_gain *= calibration_gain(s.dsp[0].get());
+    out_gain *= calibration_output_gain(s.dsp[0].get());
+  }
 
   // Clamp the model's input feed to [-1,1] -- trim_gain() can boost input up
   // to +trim_max_db() (~4x at full boost), and a NAM model fed signal well
@@ -1236,9 +1440,16 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
 
   const int fade_state = s.fade_state.load(std::memory_order_relaxed);
   const bool silent_active = s.active_index.load(std::memory_order_relaxed) < 0;
+  // Dual mono: a guitar is normally the same signal on both channels, and then one model run gives both outputs.
+  // Each model costs ~100 us per channel on this CPU, three instances running two channels each overran the 1 ms
+  // block (confirmed on hardware); running one halves that. dsp[1] is left idle meanwhile; if the channels ever differ
+  // (a stereo effect before the pedal) it is run again from its stale state, at worst a short transient.
+  const bool dual_mono = numChannels == 2 && input[0] && input[1] && output[0] && output[1] && !silent_active
+                         && std::memcmp(output[0], output[1], static_cast<size_t>(numFrames) * sizeof(float)) == 0;
+  const uint32_t dsp_channels = dual_mono ? 1u : numChannels;
   if (fade_state == 0)
   {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    for (uint32_t ch = 0; ch < dsp_channels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
@@ -1256,7 +1467,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
   }
   else if (fade_state == 1) // fading OUT the current (about-to-be-replaced) model
   {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    for (uint32_t ch = 0; ch < dsp_channels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
@@ -1316,7 +1527,7 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
   }
   else // fade_state == 2: fading IN the newly-installed model
   {
-    for (uint32_t ch = 0; ch < numChannels; ++ch)
+    for (uint32_t ch = 0; ch < dsp_channels; ++ch)
     {
       if (!input[ch] || !output[ch])
         continue;
@@ -1345,6 +1556,9 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
       s.fade_state.store(0, std::memory_order_relaxed); // transition complete
     }
   }
+
+  if (dual_mono && fade_state != 3)
+    std::memcpy(output[1], output[0], static_cast<size_t>(numFrames) * sizeof(float));
 
   // Same reasoning as the input clamp above: different .nam models have
   // different inherent output loudness, so an out_gain boost that didn't
@@ -1505,4 +1719,701 @@ extern "C" int nam_debug_fade_state_for(void* this_)
 extern "C" int nam_debug_pending_ready_for(void* this_)
 {
   return state_for(this_).pending_ready.load(std::memory_order_acquire) ? 1 : 0;
+}
+
+// ---- additive NAM pedals: dB faders and file names in the editor ---------------------------------------------------
+//
+// The pedals' Level / Tone faders should read like the FX-Loop's RETURN / SEND ("%.1f dB", -60..+12), and Drive
+// should read the selected .nam file. All three are translator ("desc") objects reached from the Patch node's
+// children (see docs/TECHNICAL.md). nam_eng_init is called by the node-registration hook (hook C) every time the
+// property nodes get activated, on the UI thread, with the {storage, name, path} triples of the extra pedals, the
+// count, the property-tree builder, and (from NAM_ENG_TAB_ADDR) the table the engine stub fills. It only starts a
+// watcher thread; the watcher walks the tree with fault-tolerant reads (a wrong guess about the layout just logs and
+// gives up -- the pedals keep their percent display and their own dB curve), clones the translator fields and keeps
+// the Drive format string in step with the knob.
+namespace
+{
+bool safe_read(uintptr_t addr, void* out, size_t n)
+{
+  if (addr < 0x10000)
+    return false;
+  iovec l{out, n}, r{reinterpret_cast<void*>(addr), n};
+  return process_vm_readv(getpid(), &l, 1, &r, 1, 0) == static_cast<ssize_t>(n);
+}
+
+bool rd_u32(uintptr_t a, uint32_t* v) { return safe_read(a, v, 4); }
+
+bool rd_cstr(uintptr_t a, size_t len, std::string* out)
+{
+  if (len == 0 || len > 60)
+    return false;
+  std::string t(len, '\0');
+  if (!safe_read(a, &t[0], len))
+    return false;
+  for (char c : t)
+    if (c < 0x20 || c > 0x7e)
+      return false;
+  *out = std::move(t);
+  return true;
+}
+
+// QString (Qt 5, 32-bit): d -> QArrayData{ref,size,alloc,offset}; UTF-16 data at d+offset. ASCII only.
+bool rd_qstring(uintptr_t qs, std::string* out)
+{
+  uint32_t d, size, off;
+  if (!rd_u32(qs, &d) || !rd_u32(d + 4, &size) || !rd_u32(d + 12, &off) || size == 0 || size > 80)
+    return false;
+  std::string t;
+  for (uint32_t i = 0; i < size; ++i)
+  {
+    uint16_t c;
+    if (!safe_read(d + off + 2 * i, &c, 2) || c < 0x20 || c > 0x7e)
+      return false;
+    t.push_back(static_cast<char>(c));
+  }
+  *out = std::move(t);
+  return true;
+}
+
+constexpr size_t kDescSize = 0x58;
+
+std::string lower(std::string s)
+{
+  for (auto& c : s)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
+
+struct Triple
+{
+  uint32_t storage, name, path;
+};
+
+struct EngTab
+{
+  uint32_t count;
+  struct E
+  {
+    uint32_t engine, qname;
+  } e[8];
+};
+
+struct Target
+{
+  std::string name;                  // "NAM 2"
+  std::string path;                  // "NAM 2/"
+  uintptr_t level[2] = {0, 0}, tone[2] = {0, 0}, drive[2] = {0, 0}; // desc objects, per mixer
+};
+
+struct DisplayState
+{
+  uintptr_t builder = 0;
+  std::vector<Triple> triples;
+  uintptr_t eng_tab = 0;
+  std::atomic<bool> started{false};
+  std::atomic<uintptr_t> latest_builder{0};
+};
+DisplayState g_disp;
+
+void clone_desc(uintptr_t dst, uintptr_t src)
+{
+  uint8_t d[kDescSize];
+  if (!safe_read(src, d, kDescSize))
+    return;
+  // defaults, min, max, step and the inline format string; the vtable / bookkeeping stay the destination's own
+  std::memcpy(reinterpret_cast<void*>(dst + 0x18), d + 0x18, kDescSize - 0x18);
+}
+
+// Same, from a saved copy of the donor's bytes (the live FX-Loop desc is replaced by the UI like any other), but the
+// fader's CURRENT value (+0x18 and its copy at +0x20) is left alone: this runs on a desc the UI just made because the
+// user moved the fader, and overwriting the value with the donor's default (0 dB) pushed the fader back to 0 dB, a
+// sudden jump in volume. Only the defaults (+0x1c, +0x24), range, step and format are taken.
+void clone_desc_bytes(uintptr_t dst, const uint8_t* d)
+{
+  std::memcpy(reinterpret_cast<void*>(dst + 0x1c), d + 0x1c, 4);
+  std::memcpy(reinterpret_cast<void*>(dst + 0x24), d + 0x24, 4);
+  std::memcpy(reinterpret_cast<void*>(dst + 0x28), d + 0x28, kDescSize - 0x28);
+}
+
+void set_desc_format(uintptr_t desc, const std::string& name)
+{
+  // Starts with the number like every other fader's text ("%.0f ..."): the knob logic may read the displayed text
+  std::string f = "%.0f ";
+  for (char c : name)
+  {
+    if (f.size() >= 28)
+      break;
+    if (c == '%')
+      f += "%%";
+    else
+      f.push_back(c);
+  }
+  if (f.size() > 31)
+    f.resize(31);
+  char buf[32] = {};
+  std::memcpy(buf, f.data(), f.size());
+  std::memcpy(reinterpret_cast<void*>(desc + 0x38), buf, 32);
+}
+
+// File names the Drive knob chooses from: the validated cache once it exists, else (the first ~25 s after boot while
+// every model is test-built) a plain listing of the folder in the same order
+std::vector<std::string> drive_names()
+{
+  std::vector<std::string> out;
+  if (g_models_ready.load(std::memory_order_acquire))
+  {
+    for (const auto& m : g_cached_models)
+      out.push_back(m.display_name);
+    return out;
+  }
+  static std::vector<std::string> quick;
+  static std::chrono::steady_clock::time_point at;
+  const auto now = std::chrono::steady_clock::now();
+  if (quick.empty() || now - at > std::chrono::seconds(2))
+  {
+    quick.clear();
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator(model_dir(), ec))
+    {
+      if (ec)
+        break;
+      const std::string fn = entry.path().filename().string();
+      if (fn.rfind("._", 0) == 0 || !entry.is_regular_file(ec))
+        continue;
+      std::string ext = entry.path().extension().string();
+      std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+      if (ext == ".nam")
+        quick.push_back(fn);
+    }
+    std::sort(quick.begin(), quick.end());
+    at = now;
+  }
+  return quick;
+}
+
+// Drive as a plain model number 1..n: the editor's own number formatter needs no per-value text, so nothing can lag
+bool set_desc_index(uintptr_t desc, const std::vector<std::string>& names)
+{
+  const int n = static_cast<int>(names.size());
+  const float mn = 1.0f, mx = static_cast<float>(std::max(n, 2)), step = 1.0f;
+  float cur[3] = {}, val = 0.f;
+  char old_fmt[32] = {};
+  if (!safe_read(desc + 0x28, cur, 12) || !safe_read(desc + 0x38, old_fmt, 31) || !safe_read(desc + 0x18, &val, 4))
+    return false;
+  // the prop keeps its own current (normalized) value at +0x18: the selected file is known without the engine
+  std::string f = "%.0f";
+  if (n > 0 && val >= 0.0f && val <= 1.0f)
+  {
+    const int z = std::clamp(static_cast<int>(std::lround(val * static_cast<float>(n - 1))), 0, n - 1);
+    std::string name = names[static_cast<size_t>(z)];
+    if (name.size() > 4 && lower(name.substr(name.size() - 4)) == ".nam")
+      name.resize(name.size() - 4);
+    if (name.size() > 6 && std::isdigit(static_cast<unsigned char>(name[0])) && name.compare(3, 3, " - ") == 0)
+      name.erase(0, 6);
+    f += ' ';
+    for (char c : name)
+    {
+      if (f.size() >= 28)
+        break;
+      if (c == '%')
+        f += "%%";
+      else
+        f.push_back(c);
+    }
+  }
+  if (f.size() > 31)
+    f.resize(31);
+  if (cur[0] == mn && cur[1] == mx && cur[2] == step && f == old_fmt)
+    return false;
+  std::memcpy(reinterpret_cast<void*>(desc + 0x28), &mn, 4);
+  std::memcpy(reinterpret_cast<void*>(desc + 0x2c), &mx, 4);
+  std::memcpy(reinterpret_cast<void*>(desc + 0x30), &step, 4);
+  char buf[32] = {};
+  std::memcpy(buf, f.data(), f.size());
+  std::memcpy(reinterpret_cast<void*>(desc + 0x38), buf, 32);
+  std::fprintf(stderr, "[nam_disp] drive desc %#lx -> '%s' (was '%s')\n", static_cast<unsigned long>(desc), f.c_str(), old_fmt);
+  return true;
+}
+
+// The pedals' props are MixerCtrl property objects: +0x30 std::string{ptr,len} path ("/Engine/MixerCtrl/NAM/Level",
+// also .../MixerCtrl2/...), +0x2c shared-ptr control block whose +0x20 is the translator desc. They are found by
+// sweeping the heap for the path text and then for the pointers to it (what the core-dump scripts did).
+struct HeapRegion
+{
+  uintptr_t lo, hi;
+};
+
+std::vector<HeapRegion> heap_regions(bool wide = false)
+{
+  std::vector<HeapRegion> out;
+  FILE* f = std::fopen("/proc/self/maps", "r");
+  if (!f)
+    return out;
+  char line[512];
+  while (std::fgets(line, sizeof(line), f))
+  {
+    unsigned long lo, hi;
+    char perm[8] = {};
+    if (std::sscanf(line, "%lx-%lx %7s", &lo, &hi, perm) != 3 || perm[0] != 'r' || perm[1] != 'w')
+      continue;
+    if (std::strstr(line, "[heap]"))
+      out.push_back({lo, hi});
+    else if (wide && hi - lo <= (96u << 20) && !std::strchr(line, '/') && !std::strchr(line, '['))
+      out.push_back({lo, hi}); // anonymous: malloc arenas of other threads
+  }
+  std::fclose(f);
+  return out;
+}
+
+struct PropHit
+{
+  size_t needle;
+  uintptr_t prop;
+};
+
+// every MixerCtrl prop whose path is one of `texts`
+// `engines`: also reports (in *engine_refs) every word holding one of those engine pointers -- module+0x270
+std::vector<PropHit> find_props(const std::vector<std::string>& texts, const std::vector<uint32_t>& engines,
+                                std::vector<PropHit>* engine_refs)
+{
+  const auto regions = heap_regions();
+  constexpr size_t kChunk = 1 << 20, kOverlap = 256;
+  std::vector<uint8_t> buf(kChunk + kOverlap);
+  std::unordered_map<std::string, size_t> by_text;
+  for (size_t i = 0; i < texts.size(); ++i)
+    by_text[texts[i]] = i;
+  std::unordered_map<uint32_t, size_t> text_at; // address of a path's NUL-terminated text -> index
+  for (const auto& r : regions)
+    for (uintptr_t a = r.lo; a < r.hi; a += kChunk)
+    {
+      const size_t n = std::min<size_t>(kChunk + kOverlap, r.hi - a);
+      if (!safe_read(a, buf.data(), n))
+        continue;
+      // one search for the common prefix, then an exact lookup of each candidate string
+      static const char kPrefix[] = "/Engine/MixerCtrl";
+      size_t o = 0;
+      while (o + sizeof(kPrefix) <= n)
+      {
+        const void* hit = memmem(buf.data() + o, n - o, kPrefix, sizeof(kPrefix) - 1);
+        if (!hit)
+          break;
+        o = static_cast<size_t>(static_cast<const uint8_t*>(hit) - buf.data());
+        if (o < kChunk)
+        {
+          const char* c = reinterpret_cast<const char*>(buf.data() + o);
+          const size_t maxlen = std::min<size_t>(80, n - o);
+          const size_t len = strnlen(c, maxlen);
+          if (len < maxlen)
+          {
+            auto it = by_text.find(std::string(c, len));
+            if (it != by_text.end())
+              text_at[static_cast<uint32_t>(a + o)] = it->second;
+          }
+        }
+        ++o;
+      }
+    }
+  std::vector<PropHit> out;
+  if (text_at.empty() && engines.empty())
+    return out;
+  uint32_t text_lo = ~0u, text_hi = 0;
+  for (const auto& kv : text_at)
+  {
+    text_lo = std::min(text_lo, kv.first);
+    text_hi = std::max(text_hi, kv.first);
+  }
+  // a prop's path text is allocated right next to the prop: look only around each text found
+  constexpr uintptr_t kWin = 0x8000;
+  std::vector<uintptr_t> wins;
+  for (const auto& kv : text_at)
+    wins.push_back(kv.first > kWin ? kv.first - kWin : 0);
+  std::sort(wins.begin(), wins.end());
+  uintptr_t covered = 0;
+  std::vector<uint8_t> wbuf(2 * kWin + 16);
+  std::unordered_map<uint32_t, bool> seen_prop;
+  for (uintptr_t lo : wins)
+  {
+    if (lo + 2 * kWin <= covered)
+      continue;
+    const uintptr_t from = std::max(lo, covered);
+    const size_t n = static_cast<size_t>(lo + 2 * kWin - from);
+    covered = lo + 2 * kWin;
+    if (!safe_read(from, wbuf.data(), n))
+      continue;
+    for (size_t o = 0; o + 8 <= n; o += 4)
+    {
+      uint32_t w, len;
+      std::memcpy(&w, wbuf.data() + o, 4);
+      if (w < text_lo || w > text_hi)
+        continue;
+      auto it = text_at.find(w);
+      if (it == text_at.end())
+        continue;
+      std::memcpy(&len, wbuf.data() + o + 4, 4);
+      if (len == texts[it->second].size() && from + o >= 0x30)
+        out.push_back({it->second, from + o - 0x30});
+    }
+  }
+  return out;
+}
+
+// the translator desc of a prop, or 0 (the prop's twin object has no control block)
+uintptr_t prop_desc(uintptr_t prop)
+{
+  uint32_t cb, desc;
+  if (!rd_u32(prop + 0x2c, &cb) || !cb || !rd_u32(cb + 0x20, &desc) || !desc)
+    return 0;
+  uint8_t probe[kDescSize];
+  if (!safe_read(desc, probe, kDescSize) || probe[0x57] != 0 || !std::memchr(probe + 0x38, 0, 32))
+    return 0;
+  return desc;
+}
+
+// A translator desc really is one: first word a small use count, the four defaults in [0,1], min/max one of the two
+// known ranges (percent, or the FX-Loop dB one), and a printable NUL-terminated format string. Writes only happen to
+// these: a freshly added pedal's half-built or freed memory also reads as "valid" zeros.
+bool desc_sane(uintptr_t desc, uint32_t want_first_word)
+{
+  uint8_t d[kDescSize];
+  if (!safe_read(desc, d, kDescSize))
+    return false;
+  uint32_t w0;
+  std::memcpy(&w0, d, 4);
+  (void)want_first_word;
+  if (w0 > 4096) // a use count (0 idle, ~6 while the editor holds it)
+    return false;
+  float f[4], mn, mx;
+  std::memcpy(f, d + 0x18, 16);
+  std::memcpy(&mn, d + 0x28, 4);
+  std::memcpy(&mx, d + 0x2c, 4);
+  for (float v : f)
+    if (!(v >= 0.0f && v <= 1.0f))
+      return false;
+  const bool pct = mn == 0.0f && mx == 100.0f, db = mn == -60.0f && mx == 12.0f;
+  const bool idx = mn == 1.0f && mx >= 2.0f && mx <= 64.0f; // Drive as a model number
+  if (!pct && !db && !idx)
+    return false;
+  size_t n = 0;
+  while (n < 32 && d[0x38 + n])
+    ++n;
+  if (n == 0 || n >= 32)
+    return false;
+  for (size_t i = 0; i < n; ++i)
+    if (d[0x38 + i] < 0x20 || d[0x38 + i] > 0x7e)
+      return false;
+  return true;
+}
+
+struct Binding
+{
+  enum Kind { Level, Tone, Drive, DonorReturn, DonorSend } kind;
+  std::string pedal; // "NAM 2", empty for donors
+  uintptr_t prop, desc;
+};
+
+// Prints the engines' counters (see ModelState::cpu_*) from the watcher thread, never from the audio thread.
+void report_engine_stats()
+{
+  static std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+  static int printed_cal[kMaxInstances];
+  static bool init = false;
+  if (!init)
+  {
+    for (int& v : printed_cal)
+      v = -1;
+    init = true;
+  }
+  for (int k = 0; k < kMaxInstances; ++k)
+  {
+    auto& st = g_instances[k];
+    void* o = st.owner_this.load(std::memory_order_acquire);
+    if (!o || !st.is_eng.load(std::memory_order_relaxed))
+      continue;
+    const int cal = st.cal_state.load(std::memory_order_relaxed);
+    if (cal >= 0 && cal != printed_cal[k])
+    {
+      printed_cal[k] = cal;
+      std::fprintf(stderr, "[nam_eng] %p calibration %s\n", o, cal ? "ON (Gain High)" : "off (Gain Low)");
+    }
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last < std::chrono::seconds(8))
+    return;
+  last = now;
+  for (int k = 0; k < kMaxInstances; ++k)
+  {
+    auto& st = g_instances[k];
+    void* o = st.owner_this.load(std::memory_order_acquire);
+    if (!o || !st.is_eng.load(std::memory_order_relaxed))
+      continue;
+    const uint32_t n = st.cpu_n.exchange(0, std::memory_order_relaxed);
+    if (!n)
+      continue; // not running (its rig is not loaded)
+    const uint64_t sum = st.cpu_sum_ns.exchange(0, std::memory_order_relaxed);
+    std::fprintf(stderr,
+                 "[nam_cpu] %p blocks=%u avg=%.0fus max=%uus over800us=%u active=%d model=%.3f in=%.3f out=%.3f models=%zu\n",
+                 o, n, static_cast<double>(sum) / n / 1000.0, st.cpu_max_us.exchange(0, std::memory_order_relaxed),
+                 st.cpu_over.exchange(0, std::memory_order_relaxed), st.active_index.load(), st.last_model.load(),
+                 st.last_in.load(), st.last_out.load(), g_cached_models.size());
+  }
+}
+
+void display_watcher()
+{
+  lower_background_thread_priority();
+  std::string last_text[8];
+  std::vector<Binding> bound;
+  uint32_t seen_calls[kMaxInstances] = {};
+  std::vector<uint32_t> last_engines;
+  std::map<uint32_t, std::string> eng_name;
+  std::map<uint32_t, int> last_tick;
+  bool pending_scan = false;
+  int name_retries = 0;
+  int since_scan = 1000;
+  int last_models = -1;
+  std::map<uintptr_t, std::pair<float, size_t>> last_val;
+  // saved FX-Loop Return / Send descs: the dB template the Level / Tone descs are converted from, at any moment
+  uint8_t ret_bytes[kDescSize] = {}, send_bytes[kDescSize] = {};
+  bool have_donors = false;
+  int percent_passes = 0; // consecutive passes with an unconverted Level / Tone desc (debounces the curve switch)
+  for (int loops = 0;; ++loops)
+  {
+    report_engine_stats();
+    last_val.clear(); // re-verify every desc once per pass (a recreated desc may sit at the same address)
+    const auto fast_names = drive_names();
+    for (int sub = 0; sub < (loops < 1000 ? 30 : 250); ++sub)
+    {
+      usleep(2 * 1000);
+      // Every knob move leaves the prop pointing at a fresh desc object: follow prop -> current desc each tick (a few
+      // 4-byte reads per prop) so the text is patched within ms, not at the next heap sweep
+      for (const auto& b : bound)
+      {
+        if ((b.kind == Binding::Level || b.kind == Binding::Tone) && have_donors)
+        {
+          // a fresh desc the UI just made for this fader reads percent: make it dB at once (a percent display and
+          // the old gain curve in between is what sounded "linear")
+          const uintptr_t d = prop_desc(b.prop);
+          char head[4];
+          if (!d || !safe_read(d + 0x38, head, 4) || std::memcmp(head, "%.1f", 4) == 0 || !desc_sane(d, 0))
+            continue;
+          clone_desc_bytes(d, b.kind == Binding::Level ? ret_bytes : send_bytes);
+          continue;
+        }
+        if (fast_names.empty() || b.kind != Binding::Drive)
+          continue;
+        const uintptr_t d = prop_desc(b.prop);
+        float v;
+        if (!d || !safe_read(d + 0x18, &v, 4))
+          continue;
+        auto& last = last_val[d];
+        if (v == last.first && fast_names.size() == last.second)
+          continue;
+        if (desc_sane(d, 0))
+        {
+          set_desc_index(d, fast_names);
+          last = {v, fast_names.size()};
+        }
+      }
+    }
+    ++since_scan;
+    // live engines: those whose process() hook ran within the last ~40 passes (a pass-to-pass tick check alone
+    // flaps, and every change would re-sweep the heap)
+    for (int k = 0; k < kMaxInstances; ++k)
+    {
+      void* o = g_instances[k].owner_this.load(std::memory_order_acquire);
+      const uint32_t c = g_instances[k].calls.load(std::memory_order_relaxed);
+      if (o && g_instances[k].is_eng.load(std::memory_order_relaxed))
+      {
+        const uint32_t e = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(o));
+        if (c != seen_calls[k])
+          last_tick[e] = loops;
+      }
+      seen_calls[k] = c;
+    }
+    std::vector<uint32_t> engines;
+    for (auto it = last_tick.begin(); it != last_tick.end();)
+    {
+      if (loops - it->second > 80)
+        it = last_tick.erase(it);
+      else
+        engines.push_back((it++)->first);
+    }
+    const bool engines_changed = engines != last_engines;
+    last_engines = engines;
+    if (engines.empty() && since_scan < 128)
+      continue;
+
+    // props found earlier must still be the same objects (their path pointer and desc chain); else sweep again
+    if (engines_changed)
+      name_retries = 0;
+    const bool missing_name = false;
+    bool stale = bound.empty() || engines_changed || pending_scan
+                 || since_scan >= 128; // also every ~8 s: a bypassed pedal brings fresh, still-percent translators
+    for (const auto& b : bound)
+    {
+      uint32_t pp;
+      if (!rd_u32(b.prop + 0x30, &pp) || prop_desc(b.prop) != b.desc)
+        stale = true;
+    }
+    if (stale)
+      pending_scan = true;
+    if (pending_scan && since_scan >= (engines_changed || missing_name ? 2 : 128))
+    {
+      since_scan = 0;
+      const auto sweep_t0 = std::chrono::steady_clock::now();
+      pending_scan = false;
+      if (missing_name)
+        ++name_retries;
+      std::vector<std::string> texts;
+      std::vector<Binding> proto;
+      static const char* const kMix[] = {"/Engine/MixerCtrl/", "/Engine/MixerCtrl2/"};
+      for (const char* mix : kMix)
+      {
+        texts.push_back(std::string(mix) + "FX-Loop/Return");
+        proto.push_back({Binding::DonorReturn, "", 0, 0});
+        texts.push_back(std::string(mix) + "FX-Loop/Send");
+        proto.push_back({Binding::DonorSend, "", 0, 0});
+        for (const Triple& t : g_disp.triples)
+        {
+          char nm[64] = {};
+          safe_read(t.name, nm, 63);
+          for (const auto& pr : {std::pair<const char*, Binding::Kind>{"Level", Binding::Level},
+                                 {"Tone", Binding::Tone}, {"Drive", Binding::Drive}})
+          {
+            texts.push_back(std::string(mix) + nm + "/" + pr.first);
+            proto.push_back({pr.second, nm, 0, 0});
+          }
+        }
+      }
+      std::vector<PropHit> eng_refs;
+      const auto hits = find_props(texts, {}, &eng_refs);
+      bound.clear();
+      for (const auto& h : hits)
+      {
+        const uintptr_t d = prop_desc(h.prop);
+        if (!d)
+          continue;
+        Binding b = proto[h.needle];
+        b.prop = h.prop;
+        b.desc = d;
+        bound.push_back(b);
+      }
+      static size_t last_bound = ~size_t(0);
+      if (bound.size() != last_bound)
+      {
+        last_bound = bound.size();
+      std::fprintf(stderr, "[nam_disp] sweep: %zu props with a desc (%zu path hits), %zu engines, %zu engine refs, %lld ms\n",
+                   bound.size(), hits.size(), engines.size(), eng_refs.size(),
+                   static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - sweep_t0).count()));
+      }
+    }
+
+    uintptr_t donor_ret = 0, donor_send = 0;
+    for (const auto& b : bound)
+    {
+      char fmt[32] = {};
+      safe_read(b.desc + 0x38, fmt, 31);
+      if (!std::strstr(fmt, "dB"))
+        continue;
+      if (b.kind == Binding::DonorReturn)
+        donor_ret = b.desc;
+      else if (b.kind == Binding::DonorSend)
+        donor_send = b.desc;
+    }
+    if (!donor_ret || !donor_send)
+    {
+      if (loops % 40 == 1)
+        std::fprintf(stderr, "[nam_disp] no FX-Loop donor descs yet (%zu bound)\n", bound.size());
+      continue;
+    }
+
+    uint32_t want_vt = 0;
+    if (!rd_u32(donor_ret, &want_vt) || !desc_sane(donor_ret, want_vt) || !desc_sane(donor_send, want_vt))
+      continue;
+    if (safe_read(donor_ret, ret_bytes, kDescSize) && safe_read(donor_send, send_bytes, kDescSize))
+      have_donors = true;
+
+    // Level <- Return, Tone <- Send (once: skipped when the desc already reads in dB)
+    for (const auto& b : bound)
+    {
+      if (b.kind != Binding::Level && b.kind != Binding::Tone)
+        continue;
+      char fmt[32] = {};
+      safe_read(b.desc + 0x38, fmt, 31);
+      if (!std::strstr(fmt, "dB") && prop_desc(b.prop) == b.desc && desc_sane(b.desc, want_vt))
+      {
+        clone_desc(b.desc, b.kind == Binding::Level ? donor_ret : donor_send);
+        std::fprintf(stderr, "[nam_disp] %s %s desc %#lx now dB\n", b.pedal.c_str(),
+                     b.kind == Binding::Level ? "Level" : "Tone", static_cast<unsigned long>(b.desc));
+      }
+    }
+
+    // dB gain curve once every NAM Level / Tone translator reads in dB (instances are not told apart any more:
+    // the props are patched wherever they are found, the engines only need the flag)
+    bool any_level = false, any_tone = false, all_db = true;
+    const auto names_now = drive_names();
+    const int n_models = static_cast<int>(names_now.size());
+    for (const auto& b : bound)
+    {
+      if (b.kind == Binding::Drive)
+      {
+        if (n_models > 0 && prop_desc(b.prop) == b.desc && desc_sane(b.desc, want_vt))
+          set_desc_index(b.desc, names_now);
+        continue;
+      }
+      if (b.kind != Binding::Level && b.kind != Binding::Tone)
+        continue;
+      // the fader's CURRENT desc (the cached one may be a replaced, stale object); a prop without one is a twin
+      // object nothing reads
+      const uintptr_t d = prop_desc(b.prop);
+      char head[4];
+      if (!d || !safe_read(d + 0x38, head, 4))
+        continue;
+      const bool db = std::memcmp(head, "%.1f", 4) == 0;
+      all_db = all_db && db;
+      (b.kind == Binding::Level ? any_level : any_tone) = true;
+    }
+    // only fall back to the old curve if an unconverted desc persists (the 2 ms loop converts a new one at once)
+    percent_passes = (any_level && any_tone && !all_db) ? percent_passes + 1 : 0;
+    static bool curve_db = false;
+    if (any_level && any_tone && all_db)
+      curve_db = true;
+    else if (percent_passes >= 8)
+      curve_db = false;
+    const bool use_db = curve_db;
+    static int last_use_db = -1;
+    if (static_cast<int>(use_db) != last_use_db)
+    {
+      last_use_db = static_cast<int>(use_db);
+      std::fprintf(stderr, "[nam_disp] gain curve: %s (Level descs in dB: %s, Tone: %s, all in dB: %s)\n",
+                   use_db ? "dB" : "PERCENT (old curve)", any_level ? "some" : "none", any_tone ? "some" : "none",
+                   all_db ? "yes" : "no");
+    }
+    for (int k = 0; k < kMaxInstances; ++k)
+      if (g_instances[k].is_eng.load(std::memory_order_relaxed))
+        g_instances[k].disp_db.store(use_db, std::memory_order_relaxed);
+    if (n_models != last_models)
+    {
+      last_models = n_models;
+      for (int k = 0; k < n_models; ++k)
+        std::fprintf(stderr, "[nam_disp] model %d: %s\n", k + 1, names_now[static_cast<size_t>(k)].c_str());
+    }
+  }
+}
+} // namespace
+
+extern "C" void nam_eng_init(const uint32_t* triples, uint32_t count, void* builder)
+{
+  g_disp.latest_builder.store(reinterpret_cast<uintptr_t>(builder));
+  bool expected = false;
+  if (!g_disp.started.compare_exchange_strong(expected, true))
+    return;
+  const char* tab = std::getenv("NAM_ENG_TAB_ADDR");
+  g_disp.eng_tab = tab ? static_cast<uintptr_t>(std::strtoul(tab, nullptr, 0)) : 0;
+  for (uint32_t i = 0; i < count && i < 8; ++i)
+    g_disp.triples.push_back(Triple{triples[3 * i], triples[3 * i + 1], triples[3 * i + 2]});
+  std::fprintf(stderr, "[nam_disp] init: builder=%p triples=%u eng_tab=%#lx\n", builder, count,
+               static_cast<unsigned long>(g_disp.eng_tab));
+  spawn_detached([]() { display_watcher(); });
 }

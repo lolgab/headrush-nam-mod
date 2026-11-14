@@ -20,9 +20,11 @@
 
 typedef enum
 {
-  NAM_MOD_NAM = 0,       /* NAM in Anxiety OD (v1) -- the original mod */
-  NAM_MOD_NAM_4X,        /* also hijack Anxiety OD V2: up to 4 NAM instances */
-  NAM_MOD_USB_CONSOLE,   /* root shell + data channel over USB serial */
+  NAM_MOD_NAM_PEDALS = 0, /* new "NAM" and "NAM TWO" pedals (Pedalboard), see spy_patch.h */
+  NAM_MOD_ANXIETY,        /* NAM in Anxiety OD (v1) -- the original hijack */
+  NAM_MOD_ANXIETY_V2,     /* also hijack Anxiety OD V2: up to 4 hijacked instances */
+  NAM_MOD_PAGE_PEDAL,     /* footswitches -> USB keyboard Page Down/Up (Pedalboard), see page_pedal.h */
+  NAM_MOD_USB_CONSOLE,    /* root shell + data channel over USB serial */
   NAM_MOD_REMOTE_SCREEN, /* mirror/control the screen from a computer */
   NAM_MOD_TUNER_TEMPO,   /* tap the tuner's tempo box to change BPM */
   NAM_MOD_COUNT
@@ -50,8 +52,9 @@ typedef struct
   bool enabled[NAM_MOD_COUNT];
 } NamModSelection;
 
-/* The installer's historical behavior: just the NAM mod. */
-NamModSelection nam_mods_default(void);
+/* What gets installed when the user picks nothing else: the NAM pedals on
+ * the Pedalboard, the Anxiety OD hijack on models without NAM pedals. */
+NamModSelection nam_mods_default(const char* model_name);
 
 const NamModInfo* nam_mod_by_key(const char* key);
 
@@ -66,7 +69,7 @@ const char* nam_mod_models_str(const NamModInfo* mod);
  * is also selected. On failure writes the reason into err. */
 bool nam_mods_validate(const NamModSelection* sel, const char* model_name, char* err, size_t err_size);
 
-/* Comma-separated keys of the selected mods, e.g. "nam,usb-console".
+/* Comma-separated keys of the selected mods, e.g. "anxiety-hijack,usb-console".
  * Returns a static buffer. */
 const char* nam_mods_selection_str(const NamModSelection* sel);
 

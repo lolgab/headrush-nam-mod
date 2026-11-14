@@ -105,22 +105,41 @@ the `blobs/` entry above.
 CLI (local dev/debugging tool only, not built or shipped by CI):
 
 ```sh
-build/gui-core-cli <stock Update.img> <out.img> --model pedalboard [--mods LIST] [--instances 2|4]
+build/gui-core-cli <stock Update.img> <out.img> --model pedalboard|mx5|gigboard [--mods LIST] \
+    [--anxiety-hijack] [--instances 2|4] [--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]]
 build/gui-core-cli --list-mods
 ```
 
-`--mods` takes a comma-separated list of mod keys (`nam`, `nam-4x`,
-`usb-console`, `remote-screen`, `tuner-tempo`; `--list-mods` describes them
-and which models each supports). It defaults to `nam`, the original
-behavior. A mod's requirement must be listed too (e.g. `remote-screen` needs
-`usb-console`), and the CLI refuses mods that aren't verified for the chosen
-model. `--instances 4` is shorthand for adding `nam-4x`: it also hijacks
-Anxiety OD V2 for up to 4 NAM instances total -- see docs/TECHNICAL.md's "Up
-to 4 instances" section. For example:
+Without `--mods`, the model's default is installed: on the Pedalboard the
+**NAM** and **NAM TWO** pedals (four instances, see docs/ADDITIVE_PEDAL.md),
+elsewhere the Anxiety OD hijack (MX5 and Gigboard have no NAM pedals yet).
+`--mods` takes an exact comma-separated list of mod keys instead
+(`nam-pedals`, `anxiety-hijack`, `anxiety-v2`, `page-pedal`, `usb-console`,
+`remote-screen`, `tuner-tempo`; `--list-mods` describes them and which
+models each supports). A mod's requirement must be listed too (e.g.
+`remote-screen` needs `usb-console`), and the CLI refuses mods that aren't
+verified for the chosen model.
+
+The other flags adjust either one. `--anxiety-hijack` adds the Anxiety OD
+hijack (the older design, opt-in on the Pedalboard, for keeping existing
+pedalboards working). `--instances 4` also hijacks Anxiety OD V2 for up to 4
+hijacked instances and implies `--anxiety-hijack` (docs/TECHNICAL.md's "Up to
+4 instances" section). `--no-nam-pedals` leaves the new pedals out (without
+`--mods`, the Anxiety OD hijack replaces them). `--page-pedal` adds the
+footswitch page-turner and colours and labels its two footswitches
+(`--page-down-note` / `--page-up-note`, 0-based, default 10 and 4, move them;
+see docs/PAGE_PEDAL.md). For example:
 
 ```sh
-build/gui-core-cli stock.img out.img --model mx5 --mods nam,usb-console,remote-screen
+build/gui-core-cli stock.img out.img --model mx5 --mods anxiety-hijack,usb-console,remote-screen
 ```
+
+The GUI caches the stock updater zip it downloads (`core/stock_cache.c`): one
+`<model>-<platform>.zip` plus a `.sha256` sidecar (hash and URL) per model in the
+per-user cache directory, reused only if the zip still hashes to the recorded
+value and the URL is unchanged. The hash is recorded at first download (trust on
+first use; there is no list of known-good official hashes). `NAM_NO_CACHE=1`
+bypasses it. The CLI takes the stock `Update.img` directly and does not use it.
 
 GUI -- can be run from anywhere, not just the repo root:
 

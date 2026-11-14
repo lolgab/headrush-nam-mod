@@ -6,12 +6,17 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--mods nam,usb-console,...] [--instances 2|4]
- *                      [--keep-work-dir]
+ *                      [--mods LIST] [--anxiety-hijack] [--instances 2|4] [--no-nam-pedals]
+ *                      [--page-pedal [--page-down-note N] [--page-up-note N]] [--keep-work-dir]
  *        gui-core-cli --list-mods
  *
- * --mods defaults to "nam" (the original behavior). --instances 4 is
- * shorthand for adding nam-4x to the list.
+ * Without --mods, the model's default is installed: the "NAM" and "NAM TWO"
+ * pedals on the Pedalboard, the Anxiety OD hijack elsewhere. --mods takes an
+ * exact comma-separated list of mod keys instead (see --list-mods). The other
+ * flags adjust either one: --anxiety-hijack adds the Anxiety OD hijack,
+ * --instances 4 adds the Anxiety OD V2 hijack too, --no-nam-pedals drops the
+ * NAM pedals (without --mods, the Anxiety OD hijack replaces them), and
+ * --page-pedal adds the footswitch page-turner.
  */
 #include "mods.h"
 #include "patch_pipeline.h"
@@ -108,24 +113,29 @@ int main(int argc, char** argv)
       return 0;
     }
 
+  const char* usage = "usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--mods LIST] "
+                      "[--anxiety-hijack] [--instances 2|4] [--no-nam-pedals] [--page-pedal [--page-down-note N] "
+                      "[--page-up-note N]] [--keep-work-dir]\n       %s --list-mods";
   if (argc < 3)
-    die("usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--mods LIST] [--instances 2|4] "
-        "[--keep-work-dir]\n       %s --list-mods",
-        argv[0], argv[0]);
+    die(usage, argv[0], argv[0]);
 
   const char* input_img = argv[1];
   const char* output_img = argv[2];
   const char* model_name = NULL;
   bool keep_work_dir = false;
+  const char* mods_list = NULL;
   int instances = 2;
-  NamModSelection mods = nam_mods_default();
+  bool page_pedal = false;
+  bool anxiety_hijack = false;
+  bool no_nam_pedals = false;
+  int page_down_note = -1, page_up_note = -1; /* -1 = the default */
 
   for (int i = 3; i < argc; ++i)
   {
     if (strcmp(argv[i], "--model") == 0 && i + 1 < argc)
       model_name = argv[++i];
     else if (strcmp(argv[i], "--mods") == 0 && i + 1 < argc)
-      parse_mods(argv[++i], &mods);
+      mods_list = argv[++i];
     else if (strcmp(argv[i], "--instances") == 0 && i + 1 < argc)
     {
       const char* v = argv[++i];
@@ -136,16 +146,52 @@ int main(int argc, char** argv)
       else
         die("--instances must be 2 or 4, got %s", v);
     }
+    else if (strcmp(argv[i], "--anxiety-hijack") == 0)
+      anxiety_hijack = true;
+    else if (strcmp(argv[i], "--no-nam-pedals") == 0)
+      no_nam_pedals = true;
+    else if (strcmp(argv[i], "--page-pedal") == 0)
+      page_pedal = true;
+    else if (strcmp(argv[i], "--page-down-note") == 0 && i + 1 < argc)
+      page_down_note = atoi(argv[++i]);
+    else if (strcmp(argv[i], "--page-up-note") == 0 && i + 1 < argc)
+      page_up_note = atoi(argv[++i]);
     else if (strcmp(argv[i], "--keep-work-dir") == 0)
       keep_work_dir = true;
     else
       die("unknown argument: %s", argv[i]);
   }
-  if (instances == 4)
-    mods.enabled[NAM_MOD_NAM_4X] = true;
 
   if (!model_name)
     die("--model is required (pedalboard|mx5|gigboard) -- no default target");
+
+  NamPatchOptions opts;
+  memset(&opts, 0, sizeof(opts));
+  NamModSelection* mods = &opts.mods;
+  if (mods_list)
+    parse_mods(mods_list, mods);
+  else
+    *mods = nam_mods_default(model_name);
+  if (anxiety_hijack || instances == 4)
+    mods->enabled[NAM_MOD_ANXIETY] = true; /* the V2 hijack only exists on top of the Anxiety OD one */
+  if (instances == 4)
+    mods->enabled[NAM_MOD_ANXIETY_V2] = true;
+  if (no_nam_pedals)
+  {
+    mods->enabled[NAM_MOD_NAM_PEDALS] = false;
+    if (!mods_list) /* --no-nam-pedals on its own means "hijack only" */
+      mods->enabled[NAM_MOD_ANXIETY] = true;
+  }
+  if (page_pedal)
+    mods->enabled[NAM_MOD_PAGE_PEDAL] = true;
+  if (page_down_note >= 0 || page_up_note >= 0)
+  {
+    if (!mods->enabled[NAM_MOD_PAGE_PEDAL])
+      die("--page-down-note / --page-up-note need the page-turner (--page-pedal)");
+    opts.page_notes_set = true;
+    opts.page_down_note = page_down_note >= 0 ? page_down_note : 10;
+    opts.page_up_note = page_up_note >= 0 ? page_up_note : 4;
+  }
 
   char workdir[NAM_TEMPDIR_MAX_PATH];
   char tempdir_err[256];
@@ -159,8 +205,8 @@ int main(int argc, char** argv)
   uint8_t* out_data;
   size_t out_len;
   char err[1024];
-  bool ok = nam_patch_pipeline(input_data, input_len, model_name, &mods, workdir, print_progress, NULL,
-                                &out_data, &out_len, err, sizeof(err));
+  bool ok = nam_patch_pipeline(input_data, input_len, model_name, &opts, workdir, print_progress, NULL, &out_data,
+                                &out_len, err, sizeof(err));
   free(input_data);
 
   if (!ok)
@@ -179,6 +225,11 @@ int main(int argc, char** argv)
   else
     nam_remove_dir_recursive(workdir);
 
-  printf("\nOK  applied mods: %s\n", nam_mods_selection_str(&mods));
+  printf("\nOK  applied mods: %s\n", nam_mods_selection_str(mods));
+  if (mods->enabled[NAM_MOD_NAM_PEDALS])
+    printf("    NAM pedals: \"NAM\" and \"NAM TWO\" in the Distortion list, two instances each.\n");
+  if (mods->enabled[NAM_MOD_PAGE_PEDAL])
+    printf("    Footswitch page-turner: FS%d -> Page Down, FS%d -> Page Up (see docs/PAGE_PEDAL.md).\n",
+           (opts.page_notes_set ? opts.page_down_note : 10) + 1, (opts.page_notes_set ? opts.page_up_note : 4) + 1);
   return 0;
 }
