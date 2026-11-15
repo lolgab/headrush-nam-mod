@@ -35,7 +35,7 @@ Four on the page, plus Shimmer through the dev control. Code in `patch/dattorro_
 | **Plate** | Dattorro plate (above) | Hi-Cut On, Gain Low (default) |
 | **Hall** | 8-line feedback delay network, Householder matrix, per-line RT60 gain and damping lowpass, modulated delays, 4 input diffusers. RT60 0.3 .. 14 s | Hi-Cut On, Gain High |
 | **Room** | Small 8-line FDN with very short prime delays (4..14 ms), 2 input diffusers, 8 early-reflection taps (7..67 ms), barely modulated. RT60 0.15 .. 1.8 s | Hi-Cut Off, Gain Low |
-| **Spring** | Two spring tanks (L / R): feedback loops of a 32-section allpass dispersion chain (the chirp), a delay and a damping lowpass, fed from a dull input. RT60 0.6 .. 5 s | Hi-Cut Off, Gain High |
+| **Spring** | Two spring tanks (56 and 69 ms, panned 80/20), the parametric model of Valimaki, Parker and Abel (JAES 2010): each spring is a feedback loop of 60 first-order allpass sections stretched to the spring's ~4.4 kHz cutoff (low frequencies arrive before high ones: the "drip" chirp, about 10 ms across the band), a delay and a lowpass, plus a 24-section "splash" path. Runs at half the sample rate (about a third of the cost of the 100-section full-rate model, which stays in `patch/reverb_lab.cpp` for comparison). RT60 0.5 .. 4 s. Own implementation from the papers; no third-party code | Hi-Cut Off, Gain High |
 | Shimmer | The hall plus an octave-up pitch shifter in its feedback (through a soft limiter). Not on the page | dev control only (`algo shimmer`) |
 
 Decay / mix / damping mean the same in all three. The Hall's wet level is compensated over a (decay, damping) grid so

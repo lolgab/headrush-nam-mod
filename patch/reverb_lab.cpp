@@ -34,6 +34,7 @@ fdn::Hall* g_hall = new fdn::Hall();
 fdn::Shimmer* g_shim = new fdn::Shimmer();
 room::Room* g_room = new room::Room();
 spring::Spring* g_spring = new spring::Spring();
+spring::SpringFull* g_springf = new spring::SpringFull();
 
 std::vector<Algo> algos()
 {
@@ -58,7 +59,30 @@ std::vector<Algo> algos()
        [](float* const* i, float* const* o, uint32_t c, int32_t n, float m, float d, float t) {
          g_spring->process(i, o, c, n, m, d, t);
        }},
+      {"springfull", [] { std::memset(g_springf, 0, sizeof *g_springf); g_springf->init(kFs); },
+       [](float* const* i, float* const* o, uint32_t c, int32_t n, float m, float d, float t) {
+         g_springf->process(i, o, c, n, m, d, t);
+       }},
   };
+}
+
+
+// spring "drip": when does the first echo of a low band and of a high band peak (band-passed impulse response)
+double band_peak_ms(const std::vector<float>& x, double f0)
+{
+  const double w0 = 2.0 * M_PI * f0 / kFs, al = std::sin(w0) / (2.0 * 4.0), a0 = 1.0 + al;
+  const double b0 = al / a0, b2 = -al / a0, a1 = -2.0 * std::cos(w0) / a0, a2 = (1.0 - al) / a0;
+  double x1 = 0, x2 = 0, y1 = 0, y2 = 0, env = 0, best = 0;
+  size_t at = 0;
+  const double k = 1.0 - std::exp(-1.0 / (0.004 * kFs));
+  for (size_t i = 0; i < static_cast<size_t>(kFs * 0.4); ++i)
+  {
+    const double in = x[i], y = b0 * in + b2 * x2 - a1 * y1 - a2 * y2;
+    x2 = x1; x1 = in; y2 = y1; y1 = y;
+    env += k * (std::fabs(y) - env);
+    if (i > static_cast<size_t>(kFs * 0.02) && env > best) { best = env; at = i; }
+  }
+  return static_cast<double>(at) / kFs * 1000.0;
 }
 
 // run in blocks of 64 like the engine
@@ -260,6 +284,9 @@ int main(int argc, char** argv)
                   ok ? "finite" : "NOT FINITE");
       if (!ok)
         ++fails;
+      if (std::string(a.name).rfind("spring", 0) == 0 && decay == 0.5f)
+        std::printf("    drip: first echo peaks at %.1f ms (300 Hz) / %.1f ms (1 kHz) / %.1f ms (3.5 kHz)\n",
+                    band_peak_ms(l, 300), band_peak_ms(l, 1000), band_peak_ms(l, 3500));
       write_wav(dir + "/ir_" + a.name + "_d" + std::to_string(static_cast<int>(decay * 10)) + ".wav",
                 std::vector<float>(l.begin(), l.begin() + static_cast<long>(kFs * 6)),
                 std::vector<float>(r.begin(), r.begin() + static_cast<long>(kFs * 6)));
@@ -319,6 +346,9 @@ int main(int argc, char** argv)
       a.init();
       run(a, in, l, r, 0.5f, 0.55f, 0.6f);
       write_wav(dir + "/phrase_" + a.name + ".wav", l, r);
+      a.init();
+      run(a, in, l, r, 1.0f, 0.55f, 0.6f); // wet only, for listening to the reverb itself
+      write_wav(dir + "/wet_" + a.name + ".wav", l, r);
     }
     // speed (host, indicative only)
     {
