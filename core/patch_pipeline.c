@@ -102,6 +102,12 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   const bool anxiety_hijack = opts->anxiety_hijack;
   const bool enable_v2_hijack = opts->anxiety_hijack && opts->anxiety_v2;
   const bool enable_page_pedal = opts->page_pedal;
+  const bool reverb_pedal = opts->nam_pedals && opts->reverb_pedal;
+  if (opts->reverb_pedal && !opts->nam_pedals)
+  {
+    set_err(err, err_size, "the Reverb pedals are built on the additive NAM pedals: enable them as well");
+    return false;
+  }
   if (!nam_pedals && !anxiety_hijack)
   {
     set_err(err, err_size, "nothing to install: enable the NAM pedals and/or the Anxiety OD hijack");
@@ -262,15 +268,21 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     memset(grown + evil_len, 0, 4096);
     evil_data = grown;
     evil_len += 4096;
-    /* two registry pairs = two picker entries, each addable twice: four NAM pedals per rig */
-    const NamPair pairs[2] = {{"NAM", "NAM", NAM_ENGINE_TYPE, 0}, {"NAM TWO", "NAM TWO", NAM_ENGINE_TYPE, 0}};
-    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, 2, err, err_size)
-        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, 2, &eng_init_slot, &eng_tab, err, err_size)
-        || !nam_elf_patch_engine_class(evil_data, evil_len, 4, eng_tab, &eng_hook_slot, err, err_size))
+    /* every pair shares the NAM engine class; the hook tells the Reverb one apart by its pedal name ("Reverb...") */
+    const NamPair pairs[3] = {{"NAM", "NAM", NAM_ENGINE_TYPE, 0},
+                              {"NAM TWO", "NAM TWO", NAM_ENGINE_TYPE, 0},
+                              {"Reverb", "Reverb", NAM_ENGINE_TYPE, 0, NAM_CAT_REVERB}};
+    const uint32_t npairs = reverb_pedal ? 3 : 2;
+    if (!nam_elf_patch_registry(evil_data, evil_len, pairs, npairs, err, err_size)
+        || !nam_elf_patch_node_registration(evil_data, evil_len, pairs, npairs, &eng_init_slot, &eng_tab, err,
+                                            err_size)
+        || !nam_elf_patch_engine_class(evil_data, evil_len, 2 * npairs, eng_tab, reverb_pedal, &eng_hook_slot, err, err_size))
       goto cleanup;
     report(progress, progress_user_data,
            "OK  NAM pedals registered: \"NAM\" and \"NAM TWO\" (2 instances each), engine hook_slot @ 0x%x",
            eng_hook_slot);
+    if (reverb_pedal)
+      report(progress, progress_user_data, "OK  Reverb pedals registered: \"Reverb\" and \"Reverb 2\" in the Reverb list (Dattorro plate)");
   }
 
   if (enable_page_pedal && strcmp(target->name, "pedalboard") != 0)
@@ -294,7 +306,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     snprintf(hook_slot_v2_hex, sizeof(hook_slot_v2_hex), "0x%x", elf_result_v2.hook_slot_addr);
   if (!nam_build_launcher_script(script_data, anxiety_hijack ? hook_slot_hex : NULL, has_v2_hijack ? hook_slot_v2_hex : NULL,
                                   nam_pedals ? hook_slot_eng_hex : NULL, nam_pedals ? eng_init_hex : NULL,
-                                  nam_pedals ? eng_tab_hex : NULL, &new_script, err, err_size))
+                                  nam_pedals ? eng_tab_hex : NULL, reverb_pedal, &new_script, err, err_size))
     goto cleanup;
   free(script_data);
   script_data = NULL;
@@ -316,6 +328,15 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
            page_down + 1, page_up + 1);
   }
 
+  if (getenv("NAM_DUMP_EVIL")) /* debugging aid: write the patched Evil next to the image (see docs/DEV_LOOP.md) */
+  {
+    FILE* df = fopen(getenv("NAM_DUMP_EVIL"), "wb");
+    if (df)
+    {
+      fwrite(evil_data, 1, evil_len, df);
+      fclose(df);
+    }
+  }
   if (!nam_ext4_inject(img, "/usr/Evil/Evil", evil_data, evil_len, 0755, err, err_size))
     goto cleanup;
 

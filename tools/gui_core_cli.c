@@ -6,7 +6,7 @@
  * by CI, see docs/BUILDING.md.
  *
  * usage: gui-core-cli <stock.img> <out.img> --model pedalboard|mx5|gigboard
- *                      [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]]
+ *                      [--anxiety-hijack [--instances 2|4]] [--no-nam-pedals] [--reverb-pedal] [--page-pedal [--page-down-note N] [--page-up-note N]]
  *                      [--keep-work-dir]
  *
  * Pedalboard default: adds the "NAM" and "NAM TWO" pedals (two instances each). --anxiety-hijack additionally (opt-in) makes Anxiety OD run
@@ -73,7 +73,7 @@ int main(int argc, char** argv)
 {
   const char* usage =
       "usage: %s <stock.img> <out.img> --model pedalboard|mx5|gigboard [--anxiety-hijack [--instances 2|4]] "
-      "[--no-nam-pedals] [--page-pedal [--page-down-note N] [--page-up-note N]] [--keep-work-dir]";
+      "[--no-nam-pedals] [--reverb-pedal] [--page-pedal [--page-down-note N] [--page-up-note N]] [--keep-work-dir]";
   if (argc < 3)
     die(usage, argv[0]);
 
@@ -85,6 +85,7 @@ int main(int argc, char** argv)
   bool page_pedal = false;
   bool anxiety_hijack = false;
   bool no_nam_pedals = false;
+  bool reverb_pedal = false;
   int page_down_note = -1, page_up_note = -1; /* -1 = the default */
 
   for (int i = 3; i < argc; ++i)
@@ -108,6 +109,8 @@ int main(int argc, char** argv)
       anxiety_hijack = true;
     else if (strcmp(argv[i], "--no-nam-pedals") == 0)
       no_nam_pedals = true;
+    else if (strcmp(argv[i], "--reverb-pedal") == 0)
+      reverb_pedal = true;
     else if (strcmp(argv[i], "--page-pedal") == 0)
       page_pedal = true;
     else if (strcmp(argv[i], "--page-down-note") == 0 && i + 1 < argc)
@@ -129,6 +132,9 @@ int main(int argc, char** argv)
   opts.anxiety_hijack = anxiety_hijack || !opts.nam_pedals;
   opts.anxiety_v2 = instances == 4;
   opts.page_pedal = page_pedal;
+  opts.reverb_pedal = reverb_pedal;
+  if (reverb_pedal && !opts.nam_pedals)
+    die("--reverb-pedal needs the NAM pedals (Pedalboard, without --no-nam-pedals)");
   if (page_down_note >= 0 || page_up_note >= 0)
   {
     if (!page_pedal)

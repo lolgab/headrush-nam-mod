@@ -162,6 +162,22 @@ and the engine class. Relevant to display:
   UI (not found). *The final polling version (follows `prop -> current desc`)
   was deployed but its consistency was not yet confirmed by the user when
   this was written.*
+* **Investigated 2026-11-12 (static, no device): why name and number can disagree.** The index rule is the same
+  in all three places (name in `set_desc_index`, engine in `nam_process_common`, both `lround(v * (n - 1))` with
+  `n` = validated model count; same sort), so a disagreement *after the models are ready* is the formatting race
+  above, not a different rule: the number is computed by the UI from the new value at once, the name comes from the
+  fmt string copied from the previous desc, i.e. it is the name of the previous position until the 2 ms poll
+  patches the new desc (too late for a text already formatted). Before the models are ready (~25 s) the name list
+  comes from a directory listing that still contains files the validation drops, so numbers/names can also shift
+  once when it completes.
+  Where the new desc comes from is NOT known yet. All float descs are built by three sibling functions
+  (`0x59b5a4`, `0x59baf0`, `0x59bdec`; args: r0 = out shared_ptr, r1 = fmt, s0 = value, s1 = default, s2/s3/s4 =
+  min/max/step; 0x58-byte object: value at +0x18/+0x20, default +0x1c/+0x24, min +0x28, max +0x2c, step +0x30,
+  fmt +0x38), 206 + 21 + 22 call sites, nearly all with a literal fmt. The ones with a computed fmt (`0x200cb0`,
+  `0x58ae88`/`0x58b0d0` = generic wrappers, `0x5c97c0`, `0x5d70cc`, `0x209288`, `0x5d6bdc`) are the candidates for
+  the per-move re-creation (`tools/evil_xref.py literal-callers`). If one of them is it, a hook after the builder
+  returns could write the right name into the fresh desc before the UI formats it, which would remove the race.
+  Next step needs the device: log the return address of every desc build while a Drive knob is moved.
 * The boot sweep takes about 4 s; the pedal shows percent for that long after
   a restart.
 * The file count at boot comes from a directory listing and can differ by the

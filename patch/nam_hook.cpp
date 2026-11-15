@@ -52,8 +52,10 @@
 #include <dlfcn.h>
 #include <cstdarg>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -65,6 +67,10 @@
 #include <memory>
 #include <mutex>
 #include <pthread.h>
+#include <signal.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <ucontext.h>
 #include <string>
 #include <sys/resource.h>
 #include <sys/uio.h>
@@ -77,6 +83,8 @@
 #include "NAM/dsp.h"
 #include "NAM/get_dsp.h"
 #include "NAM/slimmable.h"
+
+#include "reverb_unit.h"
 
 namespace
 {
@@ -1159,10 +1167,25 @@ extern "C" void nam_process_gonk(void* this_, uint32_t /*param2*/, float** input
 // sit at +0x540 (Level = input), +0x554 (Drive = model) and +0x568 (Tone = output) -- the editor lists Level before
 // Tone, so the input comes first; the engine floats themselves are confirmed on hardware:
 // the engine creates them in Level, Drive, Tone order, like Anxiety OD's.
+//
+// The same engine class also backs the "Reverb" / "Reverb 2" pedals (a Dattorro plate reverb, see
+// dattorro_reverb.h): the engine stub records {engine, &name QString} for every instance, and an engine whose pedal
+// name starts with "Reverb" is routed to reverb_process() instead of NAM. Knob meaning there: Drive = decay,
+// Level = dry/wet mix, Tone = damping (bright at 1). The Gain Low/High switch (byte 0x57c) picks the algorithm,
+// see default_reverb_algo(); the dev control channel (namespace devctl) can override everything.
+static bool eng_is_reverb(void* eng);
+static void reverb_process(void* eng, float** input, uint32_t numChannels, float** output, int32_t numFrames);
+
 extern "C" void nam_process_eng(void* this_, uint32_t /*param2*/, float** input, uint32_t numChannels,
                                  float** output, int32_t numFrames, uint32_t* /*flags*/, void* /*ctx*/)
 {
   static const KnobLayout kEng = {0x554, 0x540, 0x568, 0x26b, 0x57c, true}; // model, input, output
+  if (eng_is_reverb(this_))
+  {
+    flush_denormals_to_zero();
+    reverb_process(this_, input, numChannels, output, numFrames);
+    return;
+  }
   nam_process_common(this_, input, numChannels, output, numFrames, kEng);
 }
 
@@ -2277,6 +2300,8 @@ void display_watcher()
         {
           char nm[64] = {};
           safe_read(t.name, nm, 63);
+          if (std::strncmp(nm, "Reverb", 6) == 0)
+            continue; // reverb knobs keep the stock percent display
           for (const auto& pr : {std::pair<const char*, Binding::Kind>{"Level", Binding::Level},
                                  {"Tone", Binding::Tone}, {"Drive", Binding::Drive}})
           {
@@ -2403,8 +2428,821 @@ void display_watcher()
 }
 } // namespace
 
+// ---- additive Reverb pedals: engine classification and the Dattorro reverb instances -----------------------------
+
+namespace
+{
+constexpr int kMaxEngKinds = 16;
+constexpr int kMaxReverbs = 8;
+struct EngKind
+{
+  std::atomic<uintptr_t> eng{0};
+  std::atomic<int> reverb_slot{-2}; // -2 unresolved, -1 not a reverb, >= 0 index into g_reverbs
+  int tries = 0;                    // resolution attempts so far (audio thread only)
+  std::atomic<int> rec{-1};         // recorded at creation (nam_eng_record): -1 never, 0 NAM, 1 Reverb
+};
+EngKind g_eng_kinds[kMaxEngKinds];
+reverb::Unit g_reverbs[kMaxReverbs]; // zero-initialised static storage, select() on first use
+std::atomic<uint32_t> g_reverbs_used{0}; // reverb units in use (a bit each in g_unit_mask)
+std::atomic<uint32_t> g_unit_mask{0};
+std::atomic<uint32_t> g_rec_next{0}; // round-robin victim when every EngKind slot is taken
+
+// Claims a free reverb unit (index into g_reverbs) or returns -1.
+int alloc_unit()
+{
+  uint32_t m = g_unit_mask.load(std::memory_order_relaxed);
+  for (;;)
+  {
+    int i = 0;
+    while (i < kMaxReverbs && (m >> i & 1u))
+      ++i;
+    if (i >= kMaxReverbs)
+      return -1;
+    if (g_unit_mask.compare_exchange_weak(m, m | 1u << i, std::memory_order_acq_rel))
+    {
+      g_reverbs_used.fetch_add(1, std::memory_order_relaxed);
+      g_reverbs[i].algo = -1; // select()ed by the first block
+      return i;
+    }
+  }
+}
+void free_unit(int i)
+{
+  if (i >= 0 && i < kMaxReverbs && (g_unit_mask.fetch_and(~(1u << i)) >> i & 1u))
+    g_reverbs_used.fetch_sub(1, std::memory_order_relaxed);
+}
+bool g_reverb_was_bypassed[kMaxReverbs];
+
+// Looks `eng` up in the engine table the engine stub fills ({count, 8 x {engine, &name QString}}) and reports
+// whether its pedal is named "Reverb" / "Reverb 2". Only reads memory, never allocates: runs once per engine.
+// safe_read, except that where process_vm_readv does not exist (ENOSYS: qemu-user in the test harness) the address,
+// which comes from the engine table and the name it points at, is read directly.
+bool peek(uintptr_t addr, void* out, size_t n)
+{
+  if (safe_read(addr, out, n))
+    return true;
+  if (errno != ENOSYS || addr < 0x10000)
+    return false;
+  std::memcpy(out, reinterpret_cast<const void*>(addr), n);
+  return true;
+}
+bool peek_u32(uintptr_t a, uint32_t* v) { return peek(a, v, 4); }
+
+// 1 = named "Reverb...", 0 = another pedal (or not in the table), -1 = in the table but its name is unreadable (yet)
+int engine_named_reverb(uintptr_t eng)
+{
+  static const uintptr_t tab = []() -> uintptr_t {
+    const char* e = std::getenv("NAM_ENG_TAB_ADDR");
+    return e ? static_cast<uintptr_t>(std::strtoul(e, nullptr, 0)) : 0;
+  }();
+  uint32_t count;
+  if (!tab || !peek_u32(tab, &count))
+    return 0;
+  for (uint32_t i = 0; i < count && i < 8; ++i)
+  {
+    uint32_t e, qs;
+    if (!peek_u32(tab + 4 + 8 * i, &e) || e != eng || !peek_u32(tab + 8 + 8 * i, &qs))
+      continue;
+    uint32_t d, size, off;
+    if (!peek_u32(qs, &d) || !peek_u32(d + 4, &size) || !peek_u32(d + 12, &off) || size == 0 || size > 80)
+      return -1;
+    if (size < 6)
+      return 0;
+    static const char kName[] = "Reverb";
+    for (uint32_t k = 0; k < 6; ++k)
+    {
+      uint16_t c;
+      if (!peek(d + off + 2 * k, &c, 2))
+        return -1;
+      if (c != static_cast<uint16_t>(kName[k]))
+        return 0;
+    }
+    return 1;
+  }
+  return 0;
+}
+} // namespace
+
+static bool eng_is_reverb(void* eng)
+{
+  const uintptr_t key = reinterpret_cast<uintptr_t>(eng);
+  EngKind* k = nullptr;
+  for (int i = 0; i < kMaxEngKinds && !k; ++i)
+    if (g_eng_kinds[i].eng.load(std::memory_order_acquire) == key)
+      k = &g_eng_kinds[i];
+  for (int i = 0; i < kMaxEngKinds && !k; ++i) // first sight of this engine: claim a slot
+  {
+    uintptr_t expected = 0;
+    if (g_eng_kinds[i].eng.compare_exchange_strong(expected, key, std::memory_order_acq_rel))
+      k = &g_eng_kinds[i];
+  }
+  if (!k)
+    return false; // table full: treat as NAM
+  int slot = k->reverb_slot.load(std::memory_order_acquire);
+  if (slot != -2)
+    return slot >= 0;
+  const int rec = k->rec.load(std::memory_order_acquire);
+  if (rec >= 0) // classified when the pedal was created (nam_eng_record)
+  {
+    slot = rec > 0 ? alloc_unit() : -1;
+    std::fprintf(stderr, "[nam_eng] engine %p -> %s\n", eng, slot >= 0 ? "Reverb" : "NAM");
+    k->reverb_slot.store(slot, std::memory_order_release);
+    return slot >= 0;
+  }
+  // Resolve the pedal name from the engine table. The name QString is read at the first calls, right after the pedal
+  // was created; if it cannot be read yet it is retried for a while, then the engine counts as NAM.
+  const int r = engine_named_reverb(key);
+  if (r < 0 && ++k->tries < 256)
+    return false;
+  slot = r > 0 ? alloc_unit() : -1;
+  std::fprintf(stderr, "[nam_eng] engine %p -> %s (%d tries)\n", eng, slot >= 0 ? "Reverb" : "NAM", k->tries);
+  k->reverb_slot.store(slot, std::memory_order_release);
+  return slot >= 0;
+}
+
+// Called by the engine stub (builds with a Reverb pedal) with (engine, &pedal name QString) the moment a pedal's engine
+// is created, while the name is still valid. The engine table cannot do this: it keeps a pointer to the caller's
+// temporary QString, which holds something else by the time audio runs. Classifies by the name ("Reverb...") and
+// resets what was cached for this engine address (pedals are created and destroyed while editing a rig).
+extern "C" void nam_eng_record(void* eng, const void* name)
+{
+  bool reverb = false;
+  uint32_t d = 0, size = 0, off = 0;
+  if (peek_u32(reinterpret_cast<uintptr_t>(name), &d) && peek_u32(d + 4, &size) && peek_u32(d + 12, &off) && size >= 6
+      && size <= 80)
+  {
+    static const char kName[] = "Reverb";
+    reverb = true;
+    for (uint32_t k = 0; k < 6 && reverb; ++k)
+    {
+      uint16_t c;
+      reverb = peek(d + off + 2 * k, &c, 2) && c == static_cast<uint16_t>(kName[k]);
+    }
+  }
+  const uintptr_t key = reinterpret_cast<uintptr_t>(eng);
+  EngKind* k = nullptr;
+  for (int i = 0; i < kMaxEngKinds && !k; ++i)
+    if (g_eng_kinds[i].eng.load(std::memory_order_acquire) == key)
+      k = &g_eng_kinds[i];
+  for (int i = 0; i < kMaxEngKinds && !k; ++i)
+  {
+    uintptr_t expected = 0;
+    if (g_eng_kinds[i].eng.compare_exchange_strong(expected, key, std::memory_order_acq_rel))
+      k = &g_eng_kinds[i];
+  }
+  if (!k) // every slot taken (engines of destroyed pedals): recycle one
+  {
+    k = &g_eng_kinds[g_rec_next.fetch_add(1) % kMaxEngKinds];
+    k->eng.store(key, std::memory_order_release);
+  }
+  // a pedal created again at the same address starts over: release its unit, let the first block classify it
+  free_unit(k->reverb_slot.exchange(-2, std::memory_order_acq_rel));
+  k->tries = 0;
+  k->rec.store(reverb ? 1 : 0, std::memory_order_release);
+  std::fprintf(stderr, "[nam_eng] record engine %p name size %u -> %s\n", eng, size, reverb ? "Reverb" : "other");
+}
+
+// Which algorithm a Reverb pedal runs when nothing overrides it: Gain Low = plate, Gain High = hall.
+static int default_reverb_algo(const uint8_t* eng) { return eng[0x57c] != 0 ? reverb::kHall : reverb::kPlate; }
+
+// ---- dev control: drive the Reverb pedals without touching the device (tools/hrdev.py) -----------------------------
+// A control thread polls /tmp/nam_ctl; the shell writes commands there (one per line, written to a temp file and
+// renamed so the thread never reads half a file):
+//   algo plate|hall|shimmer|auto     force an algorithm (auto = the Gain switch decides)
+//   knob decay|mix|damp <0..1|auto>  force a knob (auto = the pedal's own value)
+//   inject impulse|noise|sine|pluck <seconds> [amp] [hz]   replace the pedal's input with a test signal
+//   capture <seconds>                record the reverb output (max 8 s) to /tmp/nam_cap.wav (16 bit stereo)
+//   dump                             raw bytes of the first Reverb engine (find where other switches live)
+//   reset | stat
+// Every command rewrites /tmp/nam_dev.out (key=value lines: algorithm in use, knobs, CPU per block, level, capture).
+// The audio thread only reads atomics and fills preallocated buffers; all file I/O is on the control thread.
+namespace devctl
+{
+constexpr uint32_t kCapFrames = 48000u * 8u;
+std::atomic<int> algo{-1};
+std::atomic<float> knob[3] = {{-1.0f}, {-1.0f}, {-1.0f}}; // decay, mix, damp; < 0 = from the engine
+std::atomic<int> inj_kind{0};                               // 0 off, 1 impulse, 2 noise, 3 sine, 4 pluck
+std::atomic<int32_t> inj_left{0};                           // frames of test signal still to play
+std::atomic<float> inj_amp{0.3f}, inj_hz{220.0f};
+std::atomic<int> inj_restart{0};
+std::atomic<uint32_t> cap_frames{0};                        // frames wanted; set by the control thread
+std::atomic<int> cap_state{0};                              // 0 idle, 1 recording, 2 done
+int16_t cap_buf[2][kCapFrames];
+uint32_t cap_pos;
+// statistics of the first Reverb engine (written by the audio thread, read racily by the control thread)
+std::atomic<uint32_t> blocks{0}, overruns{0};
+std::atomic<float> avg_us{0.0f}, max_us{0.0f}, budget_us{0.0f}, peak{0.0f}, rms_sum{0.0f}, rms_n{0.0f};
+std::atomic<int> used_algo{-1};
+std::atomic<int> frames_per_block{0};
+
+// generator state, audio thread only
+uint32_t inj_pos, rng = 0x12345678u;
+float sine_ph;
+float ks[1024];
+uint32_t ks_len, ks_i;
+
+float noise()
+{
+  rng ^= rng << 13;
+  rng ^= rng >> 17;
+  rng ^= rng << 5;
+  return static_cast<float>(static_cast<int32_t>(rng)) * (1.0f / 2147483648.0f);
+}
+
+// fills one block of the test signal into `dst`
+void generate(float* dst, int32_t n)
+{
+  const int kind = inj_kind.load(std::memory_order_relaxed);
+  const float amp = inj_amp.load(std::memory_order_relaxed), hz = inj_hz.load(std::memory_order_relaxed);
+  if (inj_restart.exchange(0, std::memory_order_acq_rel))
+  {
+    inj_pos = 0;
+    sine_ph = 0.0f;
+    ks_len = std::min<uint32_t>(1024, std::max<uint32_t>(8, static_cast<uint32_t>(kSampleRate / std::max(hz, 50.0f))));
+    for (uint32_t i = 0; i < ks_len; ++i)
+      ks[i] = noise();
+    ks_i = 0;
+  }
+  for (int32_t i = 0; i < n; ++i, ++inj_pos)
+  {
+    float v = 0.0f;
+    switch (kind)
+    {
+    case 1:
+      v = inj_pos == 0 ? amp : 0.0f;
+      break;
+    case 2:
+      v = amp * noise();
+      break;
+    case 3:
+      v = amp * std::sin(sine_ph);
+      sine_ph += 6.2831853f * hz / static_cast<float>(kSampleRate);
+      if (sine_ph > 6.2831853f)
+        sine_ph -= 6.2831853f;
+      break;
+    case 4: // Karplus-Strong: a plucked string, a stand-in for a guitar note
+    {
+      const uint32_t j = (ks_i + 1) % ks_len;
+      v = amp * ks[ks_i];
+      ks[ks_i] = 0.4985f * (ks[ks_i] + ks[j]);
+      ks_i = j;
+      break;
+    }
+    default:
+      break;
+    }
+    dst[i] = v;
+  }
+}
+
+void write_file(const char* path, const char* text)
+{
+  char tmp[96];
+  std::snprintf(tmp, sizeof tmp, "%s.tmp", path);
+  if (FILE* f = std::fopen(tmp, "w"))
+  {
+    std::fputs(text, f);
+    std::fclose(f);
+    std::rename(tmp, path);
+  }
+}
+
+void write_wav()
+{
+  const uint32_t n = std::min<uint32_t>(cap_pos, kCapFrames);
+  FILE* f = std::fopen("/tmp/nam_cap.wav.tmp", "wb");
+  if (!f)
+    return;
+  const uint32_t data = n * 4, riff = 36 + data, rate = 48000, br = rate * 4, fmt = 16;
+  const uint16_t pcm = 1, ch = 2, ba = 4, bits = 16;
+  std::fwrite("RIFF", 1, 4, f);
+  std::fwrite(&riff, 4, 1, f);
+  std::fwrite("WAVEfmt ", 1, 8, f);
+  std::fwrite(&fmt, 4, 1, f);
+  std::fwrite(&pcm, 2, 1, f);
+  std::fwrite(&ch, 2, 1, f);
+  std::fwrite(&rate, 4, 1, f);
+  std::fwrite(&br, 4, 1, f);
+  std::fwrite(&ba, 2, 1, f);
+  std::fwrite(&bits, 2, 1, f);
+  std::fwrite("data", 1, 4, f);
+  std::fwrite(&data, 4, 1, f);
+  for (uint32_t i = 0; i < n; ++i)
+  {
+    const int16_t s[2] = {cap_buf[0][i], cap_buf[1][i]};
+    std::fwrite(s, 2, 2, f);
+  }
+  std::fclose(f);
+  std::rename("/tmp/nam_cap.wav.tmp", "/tmp/nam_cap.wav");
+}
+
+void write_status(const char* extra)
+{
+  char b[1400];
+  const float n = std::max(rms_n.load(), 1.0f);
+  const float rms = 10.0f * std::log10(rms_sum.load() / n + 1e-20f);
+  const int cs = cap_state.load();
+  float k[3];
+  for (int i = 0; i < 3; ++i)
+    k[i] = knob[i].load();
+  int len = std::snprintf(
+      b, sizeof b,
+      "reverbs=%u\nalgo_forced=%s\nalgo_used=%s\nknob_forced=%.2f,%.2f,%.2f\nblock_frames=%d\nblocks=%u\n"
+      "avg_us=%.1f\nmax_us=%.1f\nbudget_us=%.1f\nload_pct=%.1f\noverruns=%u\npeak=%.4f\nrms_db=%.1f\n"
+      "inject_left=%d\ncapture=%s\n",
+      g_reverbs_used.load(), algo.load() < 0 ? "auto" : reverb::algo_name(algo.load()),
+      reverb::algo_name(used_algo.load()), static_cast<double>(k[0]), static_cast<double>(k[1]),
+      static_cast<double>(k[2]), frames_per_block.load(), blocks.load(), static_cast<double>(avg_us.load()),
+      static_cast<double>(max_us.load()), static_cast<double>(budget_us.load()),
+      static_cast<double>(budget_us.load() > 0 ? 100.0f * avg_us.load() / budget_us.load() : 0.0f), overruns.load(),
+      static_cast<double>(peak.load()), static_cast<double>(rms), inj_left.load(),
+      cs == 0 ? "idle" : cs == 1 ? "recording" : "done:/tmp/nam_cap.wav");
+  if (extra && len > 0 && len < static_cast<int>(sizeof b))
+    std::snprintf(b + len, sizeof b - static_cast<size_t>(len), "%s", extra);
+  write_file("/tmp/nam_dev.out", b);
+}
+
+void reset_stats()
+{
+  blocks = 0;
+  overruns = 0;
+  avg_us = 0.0f;
+  max_us = 0.0f;
+  peak = 0.0f;
+  rms_sum = 0.0f;
+  rms_n = 0.0f;
+}
+
+void dump_engine(char* out, size_t cap)
+{
+  size_t o = 0;
+  o += static_cast<size_t>(std::snprintf(out, cap, "dump_base=0x530\n"));
+  for (int i = 0; i < kMaxEngKinds; ++i)
+  {
+    if (g_eng_kinds[i].reverb_slot.load() < 0)
+      continue;
+    const uintptr_t e = g_eng_kinds[i].eng.load();
+    uint8_t bytes[0x80] = {};
+    if (!safe_read(e + 0x530, bytes, sizeof bytes))
+      continue;
+    o += static_cast<size_t>(std::snprintf(out + o, cap - o, "dump_slot%d=", g_eng_kinds[i].reverb_slot.load()));
+    for (size_t k = 0; k < sizeof bytes && o + 3 < cap; ++k)
+      o += static_cast<size_t>(std::snprintf(out + o, cap - o, "%02x", bytes[k]));
+    o += static_cast<size_t>(std::snprintf(out + o, cap - o, "\n"));
+    return;
+  }
+}
+
+void handle_line(char* line, char* extra, size_t extra_cap)
+{
+  char a[24] = {}, b[24] = {};
+  float x = 0, y = 0, z = 0;
+  const int n = std::sscanf(line, "%23s %23s %f %f %f", a, b, &x, &y, &z);
+  if (n < 1)
+    return;
+  if (!std::strcmp(a, "algo") && n >= 2)
+  {
+    int v = -1;
+    for (int i = 0; i < reverb::kAlgoCount; ++i)
+      if (!std::strcmp(b, reverb::algo_name(i)))
+        v = i;
+    algo = v;
+  }
+  else if (!std::strcmp(a, "knob") && n >= 3)
+  {
+    const int i = !std::strcmp(b, "decay") ? 0 : !std::strcmp(b, "mix") ? 1 : !std::strcmp(b, "damp") ? 2 : -1;
+    if (i >= 0)
+      knob[i] = x;
+  }
+  else if (!std::strcmp(a, "knob") && n == 2 && !std::strcmp(b, "auto"))
+    for (auto& k : knob)
+      k = -1.0f;
+  else if (!std::strcmp(a, "inject") && n >= 3)
+  {
+    const int kind = !std::strcmp(b, "impulse") ? 1 : !std::strcmp(b, "noise") ? 2 : !std::strcmp(b, "sine") ? 3
+                     : !std::strcmp(b, "pluck") ? 4 : 0;
+    inj_amp = n >= 4 ? y : 0.3f;
+    inj_hz = n >= 5 ? z : 220.0f;
+    inj_left = 0;
+    inj_kind = kind;
+    inj_restart = 1;
+    inj_left = kind ? static_cast<int32_t>(x * static_cast<float>(kSampleRate)) : 0;
+  }
+  else if (!std::strcmp(a, "capture") && n >= 2)
+  {
+    cap_pos = 0;
+    cap_frames = 0;
+    cap_state = 1;
+    cap_frames = static_cast<uint32_t>(std::min(8.0, std::max(0.1, static_cast<double>(std::atof(b)))) * kSampleRate);
+  }
+  else if (!std::strcmp(a, "dump"))
+    dump_engine(extra, extra_cap);
+  else if (!std::strcmp(a, "reset"))
+  {
+    algo = -1;
+    for (auto& k : knob)
+      k = -1.0f;
+    inj_left = 0;
+    cap_state = 0;
+    reset_stats();
+  }
+}
+
+void control_thread()
+{
+  char text[2048];
+  for (;;)
+  {
+    usleep(100 * 1000);
+    if (cap_state.load() == 1 && cap_pos >= cap_frames.load() && cap_frames.load() > 0)
+    {
+      write_wav();
+      cap_state = 2;
+      write_status(nullptr);
+    }
+    FILE* f = std::fopen("/tmp/nam_ctl", "r");
+    if (!f)
+      continue;
+    const size_t got = std::fread(text, 1, sizeof text - 1, f);
+    std::fclose(f);
+    std::remove("/tmp/nam_ctl");
+    text[got] = 0;
+    char extra[900] = {};
+    for (char* p = text; *p;)
+    {
+      char* e = std::strchr(p, '\n');
+      if (e)
+        *e = 0;
+      handle_line(p, extra, sizeof extra);
+      if (!e)
+        break;
+      p = e + 1;
+    }
+    usleep(150 * 1000); // let the audio thread run a few blocks under the new settings before the numbers are written
+    write_status(extra);
+  }
+}
+} // namespace devctl
+
+// starts the control thread (once); called from nam_eng_init, and directly by the ARM test
+extern "C" void nam_devctl_start()
+{
+  static std::atomic<bool> started{false};
+  bool expected = false;
+  if (started.compare_exchange_strong(expected, true))
+    spawn_detached([]() { devctl::control_thread(); });
+}
+
+static void reverb_process(void* eng, float** input, uint32_t numChannels, float** output, int32_t numFrames)
+{
+  if (numFrames <= 0 || !input || !output || !input[0] || !output[0] || numChannels == 0)
+    return;
+  if (numChannels > 2)
+    numChannels = 2;
+  int slot = -1;
+  for (int i = 0; i < kMaxEngKinds; ++i)
+    if (g_eng_kinds[i].eng.load(std::memory_order_acquire) == reinterpret_cast<uintptr_t>(eng))
+    {
+      slot = g_eng_kinds[i].reverb_slot.load(std::memory_order_acquire);
+      break;
+    }
+  if (slot < 0)
+    return;
+  const uint8_t* b = static_cast<const uint8_t*>(eng);
+  const auto knob = [b](size_t off) { return std::clamp(*reinterpret_cast<const float*>(b + off), 0.0f, 1.0f); };
+  auto& rv = g_reverbs[slot];
+  if (b[0x26b] != 0) // bypassed: dry; the tail is dropped so it does not reappear on re-engage
+  {
+    for (uint32_t ch = 0; ch < numChannels; ++ch)
+      if (input[ch] && output[ch] && input[ch] != output[ch])
+        std::memcpy(output[ch], input[ch], static_cast<size_t>(numFrames) * sizeof(float));
+    if (!g_reverb_was_bypassed[slot])
+    {
+      rv.clear();
+      g_reverb_was_bypassed[slot] = true;
+    }
+    return;
+  }
+  g_reverb_was_bypassed[slot] = false;
+
+  const int forced = devctl::algo.load(std::memory_order_relaxed);
+  rv.select(forced >= 0 ? forced : default_reverb_algo(b), kSampleRate);
+  const auto forced_knob = [](int i, float engine_value) {
+    const float k = devctl::knob[i].load(std::memory_order_relaxed);
+    return k >= 0.0f ? std::min(k, 1.0f) : engine_value;
+  };
+  const float decay = forced_knob(0, knob(0x554)), mix = forced_knob(1, knob(0x540)), damp = forced_knob(2, knob(0x568));
+
+  // test signal in place of the guitar (dev control); chunks of up to 512 frames
+  static float gen[2][512];
+  const bool is_first = slot == 0;
+  int32_t done = 0;
+  while (done < numFrames)
+  {
+    const int32_t n = std::min<int32_t>(numFrames - done, 512);
+    float* ip[2] = {input[0] + done, (numChannels > 1 && input[1] ? input[1] : input[0]) + done};
+    float* op[2] = {output[0] + done, (numChannels > 1 && output[1] ? output[1] : output[0]) + done};
+    const int32_t left = devctl::inj_left.load(std::memory_order_relaxed);
+    if (left > 0)
+    {
+      devctl::generate(gen[0], n);
+      std::memcpy(gen[1], gen[0], static_cast<size_t>(n) * sizeof(float));
+      for (int ch = 0; ch < 2; ++ch)
+        ip[ch] = gen[ch];
+      devctl::inj_left.store(std::max<int32_t>(0, left - n), std::memory_order_relaxed);
+      if (left - n <= 0)
+        devctl::inj_kind.store(0, std::memory_order_relaxed);
+    }
+    timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    rv.process(ip, op, numChannels, n, mix, decay, damp);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    if (is_first)
+    {
+      const float us = static_cast<float>(t1.tv_sec - t0.tv_sec) * 1e6f + static_cast<float>(t1.tv_nsec - t0.tv_nsec) * 1e-3f;
+      const float budget = static_cast<float>(n) / static_cast<float>(kSampleRate) * 1e6f;
+      devctl::budget_us.store(budget, std::memory_order_relaxed);
+      devctl::frames_per_block.store(n, std::memory_order_relaxed);
+      devctl::used_algo.store(rv.algo, std::memory_order_relaxed);
+      devctl::avg_us.store(devctl::avg_us.load(std::memory_order_relaxed) * 0.98f + us * 0.02f, std::memory_order_relaxed);
+      if (us > devctl::max_us.load(std::memory_order_relaxed))
+        devctl::max_us.store(us, std::memory_order_relaxed);
+      if (us > budget)
+        devctl::overruns.fetch_add(1, std::memory_order_relaxed);
+      devctl::blocks.fetch_add(1, std::memory_order_relaxed);
+      float pk = devctl::peak.load(std::memory_order_relaxed), ss = 0.0f;
+      for (int32_t i = 0; i < n; ++i)
+      {
+        pk = std::max(pk, std::fabs(op[0][i]));
+        ss += op[0][i] * op[0][i];
+      }
+      devctl::peak.store(pk, std::memory_order_relaxed);
+      devctl::rms_sum.store(devctl::rms_sum.load(std::memory_order_relaxed) + ss, std::memory_order_relaxed);
+      devctl::rms_n.store(devctl::rms_n.load(std::memory_order_relaxed) + static_cast<float>(n), std::memory_order_relaxed);
+      if (devctl::cap_state.load(std::memory_order_relaxed) == 1)
+      {
+        for (int32_t i = 0; i < n && devctl::cap_pos < devctl::cap_frames.load(std::memory_order_relaxed)
+                                      && devctl::cap_pos < devctl::kCapFrames;
+             ++i, ++devctl::cap_pos)
+        {
+          devctl::cap_buf[0][devctl::cap_pos] = static_cast<int16_t>(std::clamp(op[0][i], -1.0f, 1.0f) * 32767.0f);
+          devctl::cap_buf[1][devctl::cap_pos] = static_cast<int16_t>(std::clamp(op[1][i], -1.0f, 1.0f) * 32767.0f);
+        }
+      }
+    }
+    done += n;
+  }
+}
+
+// Bring-up tracer (only with /tmp/nam_dtortrace): logs the last calls of one Evil destructor (0x7b11c, the one the
+// crash on the 6-id build ends in) into a ring that crash_dump() prints, naming the class through its RTTI.
+struct DtorRec
+{
+  uint32_t obj, vt, p10, lr;
+};
+static DtorRec g_dtor_ring[32];
+static std::atomic<uint32_t> g_dtor_n{0};
+extern "C" void nam_dtor_log(uint32_t obj, uint32_t lr)
+{
+  DtorRec& r = g_dtor_ring[g_dtor_n.fetch_add(1) % 32];
+  r.obj = obj;
+  r.lr = lr;
+  r.vt = r.p10 = 0;
+  safe_read(obj, &r.vt, 4);
+  safe_read(obj + 0x10, &r.p10, 4);
+}
+extern "C" void nam_dtor_tramp();
+asm(".text\n.global nam_dtor_tramp\n.type nam_dtor_tramp,%function\nnam_dtor_tramp:\n"
+    "push {r0-r3,r12,lr}\nmov r1, lr\nbl nam_dtor_log\npop {r0-r3,r12,lr}\n"
+    "str r4, [sp, #-8]!\nmov r4, r0\nldr pc, [pc, #-4]\n.word 0x7b124\n");
+static void install_dtor_trace()
+{
+  uint32_t w0, w1;
+  if (!safe_read(0x7b11c, &w0, 4) || !safe_read(0x7b120, &w1, 4) || w0 != 0xe52d4008u || w1 != 0xe1a04000u)
+  {
+    std::fprintf(stderr, "[nam_crash] dtor trace: unexpected code at 0x7b11c, not installed\n");
+    return;
+  }
+  const uintptr_t pg = 0x7b000;
+  if (mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+    return;
+  auto* code = reinterpret_cast<volatile uint32_t*>(0x7b11c);
+  code[1] = reinterpret_cast<uint32_t>(&nam_dtor_tramp);
+  code[0] = 0xe51ff004u; // ldr pc, [pc, #-4]
+  __builtin___clear_cache(reinterpret_cast<char*>(0x7b11c), reinterpret_cast<char*>(0x7b124));
+  mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_EXEC);
+  std::fprintf(stderr, "[nam_crash] dtor trace installed\n");
+}
+
+// Bring-up tracer for the registry object (only with /tmp/nam_ctortrace): right after Evil constructs it (0x3fb790
+// `bl 0x624ef0`, object in r5), dump the words around the end of its in-object prototype table (+0x150, 4 bytes per
+// type id), to see what the extra ids overlay.
+extern "C" size_t malloc_usable_size(void*);
+extern "C" void nam_ctor_log(uint32_t obj)
+{
+  std::fprintf(stderr, "[nam_ctor] obj=%#x usable=%zu\n", obj, malloc_usable_size(reinterpret_cast<void*>(obj)));
+  for (uint32_t off = 0x3b0; off < 0x4b0; off += 16)
+  {
+    uint32_t w[4] = {0, 0, 0, 0};
+    for (int i = 0; i < 4; ++i)
+      safe_read(obj + off + 4 * i, &w[i], 4);
+    std::fprintf(stderr, "[nam_ctor] +%#x: %08x %08x %08x %08x\n", off, w[0], w[1], w[2], w[3]);
+  }
+}
+extern "C" void nam_ctor_tramp();
+asm(".text\n.global nam_ctor_tramp\n.type nam_ctor_tramp,%function\nnam_ctor_tramp:\n"
+    "mov r0, r5\nbl nam_ctor_log\nadd r0, r5, #0x44\nldr r12, [pc, #4]\nblx r12\nldr pc, [pc, #0]\n"
+    ".word 0x5481e0\n.word 0x3fb79c\n");
+static void install_ctor_trace()
+{
+  uint32_t w0, w1;
+  if (!safe_read(0x3fb794, &w0, 4) || !safe_read(0x3fb798, &w1, 4) || w0 != 0xe2850044u)
+  {
+    std::fprintf(stderr, "[nam_ctor] unexpected code at 0x3fb794 (%08x %08x), not installed\n", w0, w1);
+    return;
+  }
+  const uintptr_t pg = 0x3fb000;
+  if (mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
+    return;
+  auto* code = reinterpret_cast<volatile uint32_t*>(0x3fb794);
+  code[1] = reinterpret_cast<uint32_t>(&nam_ctor_tramp);
+  code[0] = 0xe51ff004u; // ldr pc, [pc, #-4]
+  __builtin___clear_cache(reinterpret_cast<char*>(0x3fb794), reinterpret_cast<char*>(0x3fb79c));
+  mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_EXEC);
+  std::fprintf(stderr, "[nam_ctor] trace installed\n");
+}
+
+// Walks the main heap chunk by chunk (glibc layout: size word at ptr-4, low 3 bits flags) and reports the first chunk whose
+// size is impossible, with the chunks before it: the one right before it overflowed. Names the owner through the RTTI
+// of a leading vtable pointer when it has one.
+static void heap_walk_report(uintptr_t where)
+{
+  uintptr_t hs = 0, he = 0;
+  if (FILE* f = std::fopen("/proc/self/maps", "r"))
+  {
+    char line[256];
+    while (std::fgets(line, sizeof(line), f))
+    {
+      unsigned long a, b;
+      if (std::sscanf(line, "%lx-%lx", &a, &b) == 2 && where >= a && where < b)
+      {
+        hs = a;
+        he = b;
+        break;
+      }
+    }
+    std::fclose(f);
+  }
+  if (!hs)
+  {
+    std::fprintf(stderr, "[nam_heap] no mapping holds %#lx\n", static_cast<unsigned long>(where));
+    return;
+  }
+  std::fprintf(stderr, "[nam_heap] heap %#lx-%#lx\n", static_cast<unsigned long>(hs), static_cast<unsigned long>(he));
+
+  uintptr_t c = hs; // chunk header address; the first chunk of the main arena starts at the heap start
+  while (c + 8 < he) // skip a possible arena header: first position with a plausible size word
+  {
+    uint32_t sz0;
+    if (safe_read(c + 4, &sz0, 4) && (sz0 & ~7u) >= 16 && (sz0 & ~7u) < 0x100000 && (sz0 & 1))
+      break;
+    c += 8;
+  }
+  {
+    uint32_t w[16] = {0};
+    for (int i = 0; i < 16; ++i)
+      safe_read(where - 16 + 4 * i, &w[i], 4);
+    std::fprintf(stderr, "[nam_heap] around bad ptr %#lx:", static_cast<unsigned long>(where));
+    for (int i = 0; i < 16; ++i)
+      std::fprintf(stderr, " %08x", w[i]);
+    std::fprintf(stderr, "\n[nam_heap] walk starts at %#lx\n", static_cast<unsigned long>(c));
+  }
+  uintptr_t hist[6] = {0, 0, 0, 0, 0, 0};
+  uint32_t hsz[6] = {0, 0, 0, 0, 0, 0};
+  uint32_t n = 0;
+  while (c + 8 <= he && n < 3000000)
+  {
+    uint32_t sz;
+    if (!safe_read(c + 4, &sz, 4))
+      break;
+    const uint32_t csz = sz & ~7u;
+    if (csz < 16 || (csz & 7) || c + csz > he + 8)
+    {
+      std::fprintf(stderr, "[nam_heap] BAD chunk at %#lx size word %#x after %u chunks\n", static_cast<unsigned long>(c), sz, n);
+      for (int k = 0; k < 6; ++k)
+      {
+        const uintptr_t pc = hist[(n + k) % 6];
+        if (!pc)
+          continue;
+        uint32_t w[8] = {0};
+        for (int i = 0; i < 8; ++i)
+          safe_read(pc + 8 + 4 * i, &w[i], 4);
+        uint32_t ti = 0, nm = 0;
+        char name[64] = "";
+        if (w[0] >= 4 && safe_read(w[0] - 4, &ti, 4) && ti && safe_read(ti + 4, &nm, 4) && nm)
+        {
+          size_t i = 0;
+          for (; i + 1 < sizeof(name); ++i)
+          {
+            char ch;
+            if (!safe_read(nm + i, &ch, 1) || !ch)
+              break;
+            name[i] = ch;
+          }
+          name[i] = 0;
+        }
+        std::fprintf(stderr, "[nam_heap]  prev chunk %#lx size %u: %08x %08x %08x %08x %08x %08x %s\n",
+                     static_cast<unsigned long>(pc), hsz[(n + k) % 6], w[0], w[1], w[2], w[3], w[4], w[5], name);
+      }
+      return;
+    }
+    hist[n % 6] = c;
+    hsz[n % 6] = csz;
+    ++n;
+    c += csz;
+  }
+  std::fprintf(stderr, "[nam_heap] walked %u chunks, heap consistent up to %#lx\n", n, static_cast<unsigned long>(c));
+}
+
+// Crash diagnostics: on SIGABRT / SIGSEGV print the registers and every stack word that points into Evil's code, so a
+// crash on the device (journal) can be mapped with tools/evil_xref.py without a debugger.
+static void crash_dump(int sig, siginfo_t*, void* uc_)
+{
+  auto* uc = static_cast<ucontext_t*>(uc_);
+  const auto& r = uc->uc_mcontext;
+  std::fprintf(stderr, "[nam_crash] signal %d pc=%#lx lr=%#lx sp=%#lx fp=%#lx\n", sig,
+               static_cast<unsigned long>(r.arm_pc), static_cast<unsigned long>(r.arm_lr),
+               static_cast<unsigned long>(r.arm_sp), static_cast<unsigned long>(r.arm_fp));
+  {
+    char path[64], comm[32] = "?";
+    std::snprintf(path, sizeof(path), "/proc/self/task/%ld/comm", static_cast<long>(syscall(SYS_gettid)));
+    if (FILE* f = std::fopen(path, "r"))
+    {
+      if (!std::fgets(comm, sizeof(comm), f))
+        std::strcpy(comm, "?");
+      std::fclose(f);
+    }
+    std::fprintf(stderr, "[nam_crash] thread %ld comm=%s", static_cast<long>(syscall(SYS_gettid)), comm);
+  }
+  for (uint32_t k = 0, n = g_dtor_n.load(); k < 32 && k < n; ++k)
+  {
+    const DtorRec& d = g_dtor_ring[(n - 1 - k) % 32];
+    uint32_t ti = 0, nm = 0;
+    char name[80] = "?";
+    if (d.vt >= 4 && safe_read(d.vt - 4, &ti, 4) && ti && safe_read(ti + 4, &nm, 4) && nm)
+    {
+      size_t i = 0;
+      for (; i + 1 < sizeof(name); ++i)
+      {
+        char c;
+        if (!safe_read(nm + i, &c, 1) || !c)
+          break;
+        name[i] = c;
+      }
+      name[i] = 0;
+    }
+    std::fprintf(stderr, "[nam_crash] dtor#%u obj=%#x vt=%#x p10=%#x lr=%#x %s\n", n - 1 - k, d.obj, d.vt, d.p10,
+                 d.lr, name);
+  }
+  const uint32_t* sp = reinterpret_cast<const uint32_t*>(r.arm_sp);
+  int shown = 0;
+  for (int i = 0; i < 4096 && shown < 80; ++i)
+  {
+    uint32_t w;
+    if (!safe_read(reinterpret_cast<uintptr_t>(sp + i), &w, 4))
+      break;
+    uint32_t prev;
+    // a real return address: the word before it is a `bl` or `blx reg`
+    if (w >= 0x10000 && w < 0x3300000 && (w & 3) == 0 && safe_read(w - 4, &prev, 4)
+        && ((prev & 0x0f000000u) == 0x0b000000u || (prev & 0x0ffffff0u) == 0x012fff30u))
+    {
+      std::fprintf(stderr, "[nam_crash] sp+%d: %#x\n", i * 4, w);
+      ++shown;
+    }
+  }
+  heap_walk_report(g_dtor_n.load() ? g_dtor_ring[(g_dtor_n.load() - 1) % 32].p10 : 0);
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+__attribute__((constructor)) static void nam_bringup_ctor()
+{
+  if (access("/tmp/nam_ctortrace", F_OK) == 0)
+    install_ctor_trace();
+  if (access("/tmp/nam_dtortrace", F_OK) == 0)
+    install_dtor_trace();
+}
+
 extern "C" void nam_eng_init(const uint32_t* triples, uint32_t count, void* builder)
 {
+  {
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crash_dump;
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGABRT, &sa, nullptr);
+    sigaction(SIGSEGV, &sa, nullptr);
+  }
   g_disp.latest_builder.store(reinterpret_cast<uintptr_t>(builder));
   bool expected = false;
   if (!g_disp.started.compare_exchange_strong(expected, true))
@@ -2415,5 +3253,11 @@ extern "C" void nam_eng_init(const uint32_t* triples, uint32_t count, void* buil
     g_disp.triples.push_back(Triple{triples[3 * i], triples[3 * i + 1], triples[3 * i + 2]});
   std::fprintf(stderr, "[nam_disp] init: builder=%p triples=%u eng_tab=%#lx\n", builder, count,
                static_cast<unsigned long>(g_disp.eng_tab));
-  spawn_detached([]() { display_watcher(); });
+  // bring-up switches: files in /tmp that turn pieces off (debugging a crash on the device without a rebuild)
+  if (access("/tmp/nam_nowatch", F_OK) != 0)
+    spawn_detached([]() { display_watcher(); });
+  else
+    std::fprintf(stderr, "[nam_disp] display watcher disabled (/tmp/nam_nowatch)\n");
+  if (access("/tmp/nam_nodevctl", F_OK) != 0)
+    nam_devctl_start();
 }

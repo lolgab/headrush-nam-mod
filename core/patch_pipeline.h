@@ -34,6 +34,7 @@ typedef struct
   bool page_notes_set; /* page-turner: use page_down_note / page_up_note instead of the defaults (FS11 / FS5) */
   int page_down_note;  /* 0-based footswitch numbers (FS number - 1) */
   int page_up_note;
+  bool reverb_pedal;   /* with nam_pedals: also add "Reverb" / "Reverb 2" (Dattorro plate reverb), see docs/REVERB_PEDAL.md */
 } NamPatchOptions;
 
 /* `workdir` must already exist (the caller creates and later removes it,

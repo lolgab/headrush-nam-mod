@@ -192,6 +192,12 @@ bool nam_elf_patch_modfac_spy(uint8_t* data, size_t data_len, uint32_t* out_tram
 #define REG_CMP_LAST_IDX_OLD 0xe35400a7u
 #define REG_CMP_COUNT 0x62589cu /* ctor: cmp r6, #0xa8 */
 #define REG_CMP_COUNT_OLD 0xe35600a8u
+/* The two `new(0xa40)` of the StateMap-sized objects (the StateMap builder 0x5f88a8 constructs one): they hold id-indexed
+ * arrays at their very end, so each extra id needs room. With 4 ids the 4 spare bytes of malloc's size rounding were
+ * enough; 6 ids overflowed into the next chunk's header and Evil died in free() on boot ("invalid pointer", crash loop). */
+#define REG_STATEMAP_NEW_A 0x3fe060u /* mov r0, #0xa40 */
+#define REG_STATEMAP_NEW_B 0x3fbe88u
+#define REG_STATEMAP_NEW_OLD 0xe3a00d29u
 #define REG_MEMSET_SZ 0x625084u /* ctor: mov r2, #0x298 (in-object prototype table) */
 #define REG_MEMSET_SZ_OLD 0xe3a02fa6u
 #define REG_SHORT_LOOP_CMP 0x3d8760u  /* cmp sl, #0xa7 */
@@ -221,6 +227,15 @@ static const uint32_t k_names16_lits[] = {0x3db6a0u, 0x3e6a04u, 0x3f2be8u};
  * no registry entry builds) to a hook in the cave. The hook rebuilds the array on its own stack with the extra
  * names appended and calls the original builder with the larger count. */
 #define CAT_CALL_SITE 0x665acu
+/* The "Reverb" category's list is built by the identical `bl 0x59c0f0` at 0x669b8 (14 names: the AIR/Eleven/Spring
+ * reverbs, the delays, Shimmer, ...), preceded by `ldm r5,{r1,r2}` = (array, count) like the Distortion one. It gets
+ * its own veneer, in the dead body of case 82 (no registry entry builds type 82), and the same hook with its own
+ * list. */
+#define CAT2_CALL_SITE 0x669b8u
+#define CAT2_CALL_SITE_OLD 0xeb14d5ccu /* bl 0x59c0f0 */
+#define CAT2_VENEER 0x209e70u          /* start of the dead case-82 body (mov r0, #0x2c8 ...) */
+#define CAT2_VENEER_OLD 0xe3a00fb2u
+#define CAT2_VENEER_CASE_SLOT (0x209bf0u + 82u * 4u)
 #define CAT_CALL_SITE_OLD 0xeb14d6cfu /* bl 0x59c0f0 */
 #define CAT_VENEER 0x209e28u          /* start of the dead case-84 body */
 #define CAT_VENEER_CASE_SLOT (0x209bf0u + 84u * 4u)
@@ -566,9 +581,14 @@ bool nam_elf_patch_registry(uint8_t* data, size_t data_len, const NamPair* pairs
       {REG_CMP_LAST_IDX, REG_CMP_LAST_IDX_OLD, "ctor last-index compare"},
       {REG_CMP_COUNT, REG_CMP_COUNT_OLD, "ctor name-count compare"},
       {REG_MEMSET_SZ, REG_MEMSET_SZ_OLD, "ctor prototype-table memset size"},
+      {REG_STATEMAP_NEW_A, REG_STATEMAP_NEW_OLD, "StateMap-sized allocation A"},
+      {REG_STATEMAP_NEW_B, REG_STATEMAP_NEW_OLD, "StateMap-sized allocation B"},
       {REG_SHORT_LOOP_CMP, REG_SHORT_LOOP_CMP_OLD, "short-name loop bound"},
       {CAT_CALL_SITE, CAT_CALL_SITE_OLD, "picker catalog call site"},
       {CAT_VENEER_CASE_SLOT, CAT_VENEER, "dead case-84 jump table slot"},
+      {CAT2_CALL_SITE, CAT2_CALL_SITE_OLD, "picker Reverb-category call site"},
+      {CAT2_VENEER_CASE_SLOT, CAT2_VENEER, "dead case-82 jump table slot"},
+      {CAT2_VENEER, CAT2_VENEER_OLD, "dead case-82 body"},
   };
   for (size_t i = 0; i < sizeof(checks) / sizeof(checks[0]); ++i)
     if (!check_word(data, data_len, checks[i].vaddr, checks[i].want, checks[i].what, err, err_size))
@@ -631,7 +651,7 @@ bool nam_elf_patch_registry(uint8_t* data, size_t data_len, const NamPair* pairs
     rw_tables += k_id_tables[t].place == PLACE_RW_TAIL;
   }
   const uint32_t new_tab_bytes = (REG_NAME_COUNT + D) * 4;
-  uint32_t hook_bytes = (uint32_t)sizeof(k_cat_hook) + 4u + 4u * npairs + hook_names;
+  uint32_t hook_bytes = (uint32_t)sizeof(k_cat_hook) + 8u + 4u * npairs + hook_names; /* hook + 2 lists */
   uint32_t cave_total = types_words * 4 + 2 * new_tab_bytes + cave_tables * new_tab_bytes + str_bytes + hook_bytes;
   uint32_t cave_off, cave_vaddr, rw_off = 0, rw_vaddr = 0;
   if (!cave_alloc(data, data_len, cave_total, &cave_off, &cave_vaddr, err, err_size))
@@ -743,32 +763,48 @@ bool nam_elf_patch_registry(uint8_t* data, size_t data_len, const NamPair* pairs
     }
   }
 
-  /* ---- 6b. picker catalog: append the pair names to the Distortion list ---- */
+  /* ---- 6b. picker catalog: append the pair names to the Distortion / Reverb lists ---- */
   {
     uint32_t h_o = next_cave_off, h_v = next_cave_vaddr;
     memcpy(data + h_o, k_cat_hook, sizeof(k_cat_hook));
     wr32(data, h_o + CAT_HOOK_LIT_OFF, CAT_STR_RANGE_CTOR);
     wr32(data, h_o + CAT_HOOK_LIT_OFF + 4, CAT_STR_CSTR_CTOR);
     wr32(data, h_o + CAT_HOOK_LIT_OFF + 8, CAT_VEC_BUILD);
-    uint32_t l_o = h_o + (uint32_t)sizeof(k_cat_hook), l_v = h_v + (uint32_t)sizeof(k_cat_hook);
-    uint32_t n_o = l_o + 4 + 4 * npairs, n_v = l_v + 4 + 4 * npairs;
-    wr32(data, l_o, npairs); /* extra names */
-    for (uint32_t p = 0; p < npairs; ++p)
+    uint32_t cur_o = h_o + (uint32_t)sizeof(k_cat_hook), cur_v = h_v + (uint32_t)sizeof(k_cat_hook);
+    static const struct
     {
-      size_t nl = strlen(pairs[p].name);
-      wr32(data, l_o + 4 + 4 * p, n_v);
-      memcpy(data + n_o, pairs[p].name, nl + 1);
-      uint32_t adv = (uint32_t)((nl + 1 + 3) & ~3u);
-      n_o += adv, n_v += adv;
+      uint32_t category, call_site, veneer;
+    } cats[2] = {{NAM_CAT_DISTORTION, CAT_CALL_SITE, CAT_VENEER}, {NAM_CAT_REVERB, CAT2_CALL_SITE, CAT2_VENEER}};
+    for (int c = 0; c < 2; ++c)
+    {
+      uint32_t n = 0;
+      for (uint32_t p = 0; p < npairs; ++p)
+        n += pairs[p].category == cats[c].category;
+      if (n == 0)
+        continue; /* nothing to add: leave that category's call site alone */
+      uint32_t l_o = cur_o, l_v = cur_v;
+      uint32_t n_o = l_o + 4 + 4 * n, n_v = l_v + 4 + 4 * n, k = 0;
+      wr32(data, l_o, n); /* extra names */
+      for (uint32_t p = 0; p < npairs; ++p)
+      {
+        if (pairs[p].category != cats[c].category)
+          continue;
+        size_t nl = strlen(pairs[p].name);
+        wr32(data, l_o + 4 + 4 * k++, n_v);
+        memcpy(data + n_o, pairs[p].name, nl + 1);
+        uint32_t adv = (uint32_t)((nl + 1 + 3) & ~3u);
+        n_o += adv, n_v += adv;
+      }
+      cur_o = n_o, cur_v = n_v;
+      /* veneer: ldr r3,[pc] (list) ; ldr pc,[pc] (hook) ; .word list ; .word hook */
+      uint32_t vo = cats[c].veneer - VADDR_BASE;
+      wr32(data, vo + 0, 0xe59f3000u);
+      wr32(data, vo + 4, 0xe59ff000u);
+      wr32(data, vo + 8, l_v);
+      wr32(data, vo + 12, h_v);
+      int32_t rel = ((int32_t)cats[c].veneer - (int32_t)(cats[c].call_site + 8)) >> 2;
+      wr32(data, cats[c].call_site - VADDR_BASE, 0xeb000000u | ((uint32_t)rel & 0xffffffu));
     }
-    /* veneer: ldr r3,[pc] (list) ; ldr pc,[pc] (hook) ; .word list ; .word hook */
-    uint32_t vo = CAT_VENEER - VADDR_BASE;
-    wr32(data, vo + 0, 0xe59f3000u);
-    wr32(data, vo + 4, 0xe59ff000u);
-    wr32(data, vo + 8, l_v);
-    wr32(data, vo + 12, h_v);
-    int32_t rel = ((int32_t)CAT_VENEER - (int32_t)(CAT_CALL_SITE + 8)) >> 2;
-    wr32(data, CAT_CALL_SITE - VADDR_BASE, 0xeb000000u | ((uint32_t)rel & 0xffffffu));
   }
 
   /* ---- 7. bounds and hard-coded ids ---- */
@@ -796,6 +832,17 @@ bool nam_elf_patch_registry(uint8_t* data, size_t data_len, const NamPair* pairs
   {
     uint32_t add = id_site_add(k_id_sites[i].kind, D, R);
     wr32(data, k_id_sites[i].vaddr - VADDR_BASE, bump_imm(k_id_sites[i].old_w, add));
+  }
+  if (D > 4) /* the 4-id build stays byte-identical to the one confirmed on hardware */
+  {
+    const uint32_t w = bump_imm(REG_STATEMAP_NEW_OLD, 16 * D);
+    if (!w)
+    {
+      set_err(err, err_size, "StateMap allocation size cannot be encoded for %u ids", (unsigned)D);
+      return false;
+    }
+    wr32(data, REG_STATEMAP_NEW_A - VADDR_BASE, w);
+    wr32(data, REG_STATEMAP_NEW_B - VADDR_BASE, w);
   }
   return true;
 }
@@ -830,7 +877,14 @@ bool nam_elf_patch_registry_test(uint8_t* data, size_t data_len, const char* nam
 #define NODE_VENEER_B 0x209e40u
 #define NODE_VENEER_A_W 0xe1a0b000u /* mov fp, r0 (dead case-84 body) */
 #define NODE_VENEER_B_W 0xeb0a1bc4u
-#define ENG_TAB_BYTES (4u + 8u * 8u) /* engine table: count + 8 x {engine ptr, name QString ptr} */
+#define ENG_TAB_MAX 8u
+/* engine table: count + n x {engine ptr, name QString ptr}; n = 8 (what the engine stub's `cmp r2,#8` allows), or the
+ * id count when that is above 4 (6 ids): the R+W tail slack cannot hold more, and the stub's limit is patched to n */
+static uint32_t eng_tab_entries(uint32_t ids)
+{
+  return ids > 4u ? ids : ENG_TAB_MAX;
+}
+#define ENG_TAB_BYTES(ids) (4u + 8u * eng_tab_entries(ids))
 #define NODE_HOOK_B_OFF 0xa8u
 #define NODE_HOOK_C_OFF 0x164u
 #define NODE_HOOK_D_OFF 0x1e8u
@@ -906,10 +960,31 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
     return false;
   const uint32_t region = (1u + REG_TYPE_COUNT) * 4u;
   const uint32_t blob_len = (uint32_t)sizeof(k_node_hooks);
-  if (blob_len + 12u * inst > region)
+  /* The {storage, name, path} triples normally follow the blob inside the old types array. Past 4 ids they no longer
+   * fit (3 pairs = 6 ids): then they go to the R+W tail and the four `add rX, rY, #0x24` that formed their address
+   * (tab + 0x24) become `ldr rX, [rY, #0x24]` reading a pointer stored there instead. */
+  const bool relocate = blob_len + 12u * inst > region;
+  if (relocate && blob_len + 4u > region)
   {
     set_err(err, err_size, "REFUSING: node hooks do not fit the old types array");
     return false;
+  }
+  static const struct
+  {
+    uint32_t off, add_word, ldr_word;
+  } k_triple_sites[4] = {{0x34u, 0xe289a024u, 0xe599a024u},
+                         {0xccu, 0xe289a024u, 0xe599a024u},
+                         {0x174u, 0xe2863024u, 0xe5963024u},
+                         {0x1c4u, 0xe2860024u, 0xe5960024u}};
+  for (int i = 0; i < 4; ++i)
+  {
+    uint32_t w;
+    memcpy(&w, k_node_hooks + k_triple_sites[i].off, 4);
+    if (w != k_triple_sites[i].add_word)
+    {
+      set_err(err, err_size, "internal error: node hook blob does not have the expected triple-address instructions");
+      return false;
+    }
   }
   if (rd32(data, REG_VADDR_TYPES_START_LIT - VADDR_BASE) == REG_TYPES_START)
   {
@@ -922,23 +997,34 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
   uint32_t str_bytes = (uint32_t)(sizeof(k_p1) + sizeof(k_p2) + 8);
   for (uint32_t p = 0; p < npairs; ++p)
     str_bytes += nam_pair_instances(&pairs[p]) * (uint32_t)((strlen(pairs[p].name) + 8 + 3) & ~3u) * 2u;
-  const uint32_t str_start = REG_NAMES_BASE + 4u * inst + 8u;
-  if (str_start + str_bytes > REG_NAMES_BASE + 0xf8u /* the engine vtable clone starts at +0x100 */
-      || rd32(data, REG_NAMES_LIT_CTOR - VADDR_BASE) == REG_NAMES_BASE - 4)
+  uint32_t str_start = REG_NAMES_BASE + 4u * inst + 8u;
+  if (rd32(data, REG_NAMES_LIT_CTOR - VADDR_BASE) == REG_NAMES_BASE - 4)
   {
     set_err(err, err_size, "REFUSING: node strings do not fit the old name array, or the registry patch has not run");
     return false;
   }
+  bool strings_in_cave = false;
+  uint32_t cave_str_off = 0;
+  if (str_start + str_bytes > REG_NAMES_BASE + 0xf8u /* the engine vtable clone starts at +0x100 */)
+  {
+    /* too many / too long names for the dead name array: the strings (read-only data) go to the code cave */
+    if (!cave_alloc(data, data_len, str_bytes, &cave_str_off, &str_start, err, err_size))
+      return false;
+    strings_in_cave = true;
+  }
   uint32_t r_off, r_vaddr;
   /* storages, then the init-hook slot (one word, read by hook C) and the engine table the engine stub fills
    * ({count, 8 x {engine, &name}}) */
-  if (!rw_tail_alloc(data, data_len, 12u * inst + 4u + ENG_TAB_BYTES, &r_off, &r_vaddr, err, err_size))
+  if (!rw_tail_alloc(data, data_len, 12u * inst + 4u + ENG_TAB_BYTES(inst), &r_off, &r_vaddr, err, err_size))
+    return false;
+  uint32_t triples_off = 0, triples_vaddr = 0; /* only used when relocate: the (read-only) triples go to the cave */
+  if (relocate && !cave_alloc(data, data_len, 12u * inst, &triples_off, &triples_vaddr, err, err_size))
     return false;
   const uint32_t c_off = REG_TYPES_START - VADDR_BASE, c_vaddr = REG_TYPES_START;
   memset(data + c_off, 0, region);
   memcpy(data + c_off, k_node_hooks, blob_len);
   const uint32_t tab = c_off + NODE_HOOK_TAB_OFF;
-  uint32_t so = str_start - VADDR_BASE, sv = str_start;
+  uint32_t so = strings_in_cave ? cave_str_off : str_start - VADDR_BASE, sv = str_start;
 #define NODE_STR(text, out_v)                                                                                        \
   do                                                                                                                 \
   {                                                                                                                  \
@@ -970,12 +1056,18 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
       uint32_t v_name, v_path;
       NODE_STR(nm, v_name);
       NODE_STR(pn, v_path);
-      uint32_t t = tab + 36 + 12 * i;
+      uint32_t t = relocate ? triples_off + 12 * i : tab + 36 + 12 * i;
       wr32(data, t, r_vaddr + 12 * i);
       wr32(data, t + 4, v_name);
       wr32(data, t + 8, v_path);
     }
 #undef NODE_STR
+  if (relocate)
+  {
+    wr32(data, tab + 36, triples_vaddr);
+    for (int k = 0; k < 4; ++k)
+      wr32(data, c_off + k_triple_sites[k].off, k_triple_sites[k].ldr_word);
+  }
   /* hook D: a 4-instance pedal tries ids first+2 and first+3 when the picker finds the first two in use. The
    * displaced pair at 0x3cdfe0 is the picker's "both instances in use" exit. */
   if (inst == 4)
@@ -1039,6 +1131,7 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
 #define ENG_STUB_LIT_EVT_OFF 0x84u
 #define ENG_STUB_LIT_SLOT_OFF 0x88u
 #define ENG_STUB_LIT_TAB_OFF 0x90u
+#define ENG_STUB_CMP_OFF 0x44u /* cmp r2, #8 (table capacity) */
 
 static const uint8_t k_eng_stub[148] = {
   0x70, 0x40, 0x2d, 0xe9, 0x10, 0xc0, 0x9d, 0xe5, 0x08, 0xd0, 0x4d, 0xe2,
@@ -1056,8 +1149,29 @@ static const uint8_t k_eng_stub[148] = {
   0x00, 0x00, 0x00, 0x00,
 };
 
-bool nam_elf_patch_engine_class(uint8_t* data, size_t data_len, uint32_t ids, uint32_t eng_tab, uint32_t* out_hook_slot,
-                                char* err, size_t err_size)
+/* record-hook variant (patch/engine_stub_rec.S): calls record(engine, &name) through *tab at creation instead of
+ * filling the table */
+#define ENG_STUBR_TRAMP_OFF 0x58u
+#define ENG_STUBR_LIT_EVT_OFF 0x70u
+#define ENG_STUBR_LIT_SLOT_OFF 0x74u
+#define ENG_STUBR_LIT_TAB_OFF 0x7cu
+
+static const uint8_t k_eng_stub_rec[128] = {
+  0x70, 0x40, 0x2d, 0xe9, 0x10, 0xc0, 0x9d, 0xe5, 0x08, 0xd0, 0x4d, 0xe2,
+  0x00, 0xc0, 0x8d, 0xe5, 0x00, 0x40, 0xa0, 0xe1, 0x02, 0x60, 0xa0, 0xe1,
+  0x4c, 0xc0, 0x9f, 0xe5, 0x3c, 0xff, 0x2f, 0xe1, 0x08, 0xd0, 0x8d, 0xe2,
+  0x00, 0x50, 0xa0, 0xe1, 0x70, 0x02, 0x94, 0xe5, 0x00, 0x00, 0x50, 0xe3,
+  0x06, 0x00, 0x00, 0x0a, 0x34, 0x10, 0x9f, 0xe5, 0x00, 0x10, 0x80, 0xe5,
+  0x38, 0xc0, 0x9f, 0xe5, 0x00, 0xc0, 0x9c, 0xe5, 0x00, 0x00, 0x5c, 0xe3,
+  0x06, 0x10, 0xa0, 0x11, 0x3c, 0xff, 0x2f, 0x11, 0x05, 0x00, 0xa0, 0xe1,
+  0x70, 0x80, 0xbd, 0xe8, 0x14, 0xc0, 0x9f, 0xe5, 0x00, 0xc0, 0x9c, 0xe5,
+  0x00, 0x00, 0x5c, 0xe3, 0x1c, 0xff, 0x2f, 0x11, 0x08, 0xf0, 0x9f, 0xe5,
+  0x20, 0xcc, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  0x68, 0x6b, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
+
+bool nam_elf_patch_engine_class(uint8_t* data, size_t data_len, uint32_t ids, uint32_t eng_tab, bool record_hook,
+                                uint32_t* out_hook_slot, char* err, size_t err_size)
 {
   if (!check_word(data, data_len, ENG_CASE_VTT_LIT, ENG_CASE_VTT_LIT_OLD, "dead case 80 VTT literal", err, err_size)
       || !check_word(data, data_len, ENG_CASE_VT_LIT, ENG_CASE_VT_LIT_OLD, "dead case 80 vtable literal", err, err_size)
@@ -1099,12 +1213,27 @@ bool nam_elf_patch_engine_class(uint8_t* data, size_t data_len, uint32_t ids, ui
   memcpy(data + (mod_hdr - VADDR_BASE), data + (ENG_MOD_VT - 8 - VADDR_BASE), 8u + 4u * ENG_MOD_VT_WORDS);
   memcpy(data + (eng_hdr - VADDR_BASE), data + (ENG_VT - 8 - VADDR_BASE), 8u + 4u * ENG_VT_WORDS);
   /* stub + trampoline */
-  memcpy(data + (stub - VADDR_BASE), k_eng_stub, sizeof(k_eng_stub));
-  wr32(data, stub - VADDR_BASE + ENG_STUB_LIT_EVT_OFF, eng_vt);
-  wr32(data, stub - VADDR_BASE + ENG_STUB_LIT_SLOT_OFF, slot_vaddr);
-  wr32(data, stub - VADDR_BASE + ENG_STUB_LIT_TAB_OFF, eng_tab);
-  wr32(data, mod_vt - VADDR_BASE + 4u * ENG_SETUP_SLOT, stub + ENG_STUB_SETUP_OFF);
-  wr32(data, eng_vt - VADDR_BASE + 4u * ENG_PROCESS_SLOT, stub + ENG_STUB_TRAMP_OFF);
+  uint32_t tramp_off, setup_off = ENG_STUB_SETUP_OFF;
+  if (record_hook)
+  {
+    memcpy(data + (stub - VADDR_BASE), k_eng_stub_rec, sizeof(k_eng_stub_rec));
+    wr32(data, stub - VADDR_BASE + ENG_STUBR_LIT_EVT_OFF, eng_vt);
+    wr32(data, stub - VADDR_BASE + ENG_STUBR_LIT_SLOT_OFF, slot_vaddr);
+    wr32(data, stub - VADDR_BASE + ENG_STUBR_LIT_TAB_OFF, eng_tab); /* *eng_tab = record hook, filled by the preload */
+    tramp_off = ENG_STUBR_TRAMP_OFF;
+  }
+  else
+  {
+    memcpy(data + (stub - VADDR_BASE), k_eng_stub, sizeof(k_eng_stub));
+    if (eng_tab_entries(ids) != ENG_TAB_MAX) /* the table was sized to the id count: bound the stub's fill loop likewise */
+      wr32(data, stub - VADDR_BASE + ENG_STUB_CMP_OFF, 0xe3520000u | eng_tab_entries(ids)); /* cmp r2, #n */
+    wr32(data, stub - VADDR_BASE + ENG_STUB_LIT_EVT_OFF, eng_vt);
+    wr32(data, stub - VADDR_BASE + ENG_STUB_LIT_SLOT_OFF, slot_vaddr);
+    wr32(data, stub - VADDR_BASE + ENG_STUB_LIT_TAB_OFF, eng_tab);
+    tramp_off = ENG_STUB_TRAMP_OFF;
+  }
+  wr32(data, mod_vt - VADDR_BASE + 4u * ENG_SETUP_SLOT, stub + setup_off);
+  wr32(data, eng_vt - VADDR_BASE + 4u * ENG_PROCESS_SLOT, stub + tramp_off);
   /* dead case 80 builds a Glorious-Drive-shaped module with the cloned vtable */
   wr32(data, ENG_CASE_VTT_LIT - VADDR_BASE, rd32(data, ENG_GD_VTT_LIT - VADDR_BASE));
   wr32(data, ENG_CASE_VT_LIT - VADDR_BASE, mod_vt);

@@ -121,6 +121,8 @@ __attribute__((constructor)) static void install_nam_hooks()
   install_one_hook(lib, "nam_process_eng", "NAM_HOOK_SLOT_ENG_ADDR");
   // Called by the node-registration hook once the extra pedals' property nodes exist (dB / file-name display).
   install_one_hook(lib, "nam_eng_init", "NAM_HOOK_SLOT_ENG_INIT_ADDR");
+  // Reverb builds: the engine stub calls this with (engine, &pedal name QString) when a pedal is created.
+  install_one_hook(lib, "nam_eng_record", "NAM_HOOK_SLOT_ENG_REC_ADDR");
   install_one_hook(lib, "nam_process", "NAM_HOOK_SLOT_ADDR");
 
   // The one-time *.nam model preload (nam_hook.cpp's

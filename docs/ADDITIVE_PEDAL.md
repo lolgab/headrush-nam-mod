@@ -49,7 +49,11 @@ stock ones.
    names appended, so "NAM" and "NAM TWO" appear at the end of Distortion (each
    one's "2" twin is made by adding it again). (The
    hook must initialize the destination string itself: `0x5b48e0` does not
-   and crashes in libc otherwise.)
+   and crashes in libc otherwise.) Every list is built by the same
+   `bl 0x59c0f0 (out, array, count)`; the "Reverb" list's is at `0x669b8`
+   (14 names). A pair with `NamPair.category = NAM_CAT_REVERB` is appended
+   there instead, through a second veneer (dead case 82, `0x209e70`) and the
+   same hook with its own list ([REVERB_PEDAL.md](REVERB_PEDAL.md)).
 3. **Second instance logic.** Picker index `s` maps to ids `2s-1` / `2s` for
    `s <= 83`, with a presence check and a second-instance path; above that the
    tail does `id = s + 83` with no duplicate logic. The three constants in

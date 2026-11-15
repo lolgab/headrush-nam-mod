@@ -25,7 +25,7 @@
  * exactly once (refuse-on-mismatch, same as the Python original). */
 bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex,
                                 const char* hook_slot_v2_addr_hex, const char* hook_slot_eng_addr_hex,
-                                const char* eng_init_slot_hex, const char* eng_tab_hex, char** out, char* err,
+                                const char* eng_init_slot_hex, const char* eng_tab_hex, bool eng_record, char** out, char* err,
                                 size_t err_size);
 
 /* Adds the page-pedal block (starts /usr/Evil/Scripts/pagepedal-usb.sh boot

@@ -77,7 +77,7 @@ static bool sb_append_str(StrBuf* sb, const char* s)
 
 bool nam_build_launcher_script(const char* stock_script_text, const char* hook_slot_addr_hex,
                                 const char* hook_slot_v2_addr_hex, const char* hook_slot_eng_addr_hex,
-                                const char* eng_init_slot_hex, const char* eng_tab_hex, char** out, char* err,
+                                const char* eng_init_slot_hex, const char* eng_tab_hex, bool eng_record, char** out, char* err,
                                 size_t err_size)
 {
   *out = NULL;
@@ -170,7 +170,8 @@ bool nam_build_launcher_script(const char* stock_script_text, const char* hook_s
   }
   if (eng_tab_hex)
   {
-    ok = ok && sb_append_str(&final, " NAM_ENG_TAB_ADDR=");
+    /* record-hook builds: the word at that address is the record() slot libnam_preload.so fills, not a table */
+    ok = ok && sb_append_str(&final, eng_record ? " NAM_HOOK_SLOT_ENG_REC_ADDR=" : " NAM_ENG_TAB_ADDR=");
     ok = ok && sb_append_str(&final, eng_tab_hex);
   }
   if (hook_slot_v2_addr_hex)

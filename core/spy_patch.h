@@ -21,12 +21,17 @@ bool nam_elf_patch_modfac_spy(uint8_t* data, size_t data_len, uint32_t* out_tram
 
 #define NAM_MAX_PAIRS 3
 
+/* Picker category a pair's names are listed under. */
+#define NAM_CAT_DISTORTION 0u
+#define NAM_CAT_REVERB 1u
+
 typedef struct
 {
   const char* name;       /* "<name>" and "<name> 2" become pedals; at most 12 characters */
   const char* short_name; /* short names, likewise */
   uint32_t type_idx;      /* existing ModFac type the pair is built as (91 = Glorious Drive) */
   uint32_t instances;     /* ids owned: 2 (default, "<n>", "<n> 2") or 4 ("<n>" .. "<n> 4", then it must be the only pedal) */
+  uint32_t category;      /* NAM_CAT_DISTORTION (0, default) or NAM_CAT_REVERB: the picker list the name appears in */
 } NamPair;
 
 /* Registers `npairs` extra "<name>" / "<name> 2" pedal pairs after the last normal pair (ids 167..166+2n; FX-Loop,
@@ -55,8 +60,11 @@ bool nam_elf_patch_node_registration(uint8_t* data, size_t data_len, const NamPa
 /* Gives type NAM_ENGINE_TYPE its own module+engine vtables (clones of Glorious Drive's) whose engine process() jumps
  * through a writable hook slot, returned in *out_hook_slot (libnam_preload.so fills it; it is 0 = original
  * process() until then). ids = number of extra ids the registry patch added. Call after nam_elf_patch_registry. */
-bool nam_elf_patch_engine_class(uint8_t* data, size_t data_len, uint32_t ids, uint32_t eng_tab, uint32_t* out_hook_slot,
-                                char* err, size_t err_size);
+bool nam_elf_patch_engine_class(uint8_t* data, size_t data_len, uint32_t ids, uint32_t eng_tab, bool record_hook,
+                                uint32_t* out_hook_slot, char* err, size_t err_size);
+/* record_hook: instead of filling the {engine, &name} table the stub calls record(engine, &name QString) through the
+ * word at eng_tab right when the pedal is created (0 = no call until libnam_preload.so fills it). The table design
+ * cannot tell pedals apart by name: the name is a temporary of the caller and is gone by the time audio runs. */
 
 /* Debug: logs every call through the qt_static_metacall-style dispatcher at 0x86798 (method index, arguments) to
  * /tmp/meta.bin, to see what the block-type picker asks the UI model. Pedalboard 2.7 only.

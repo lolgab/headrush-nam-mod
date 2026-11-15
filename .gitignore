@@ -10,3 +10,6 @@ __pycache__/
 
 # fetched by scripts/fetch_nam_core.sh (tarball, not a git submodule)
 /nam_core/
+
+# dev tooling virtualenv (tools/hrdev.py)
+tools/.venv/
