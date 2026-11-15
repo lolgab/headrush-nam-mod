@@ -58,3 +58,12 @@ present (add a Reverb pedal to a rig once):
 
 `load_pct` in the status is the average time of one `rv.process()` block against the time the block represents. It
 is the number that decides whether an algorithm fits next to four NAM models.
+
+## Detail pages on a live device (`tools/qml_patch.py`)
+
+`qml_patch.py patch <Evil> <regions> --key /Pages/BlockDetails.qml --old '<text>' --new '<text>'` writes the byte
+regions of an edited QML source plus its key break, `qml_patch.py apply <regions>.json` pushes them to the device
+(verified by md5), builds `/tmp/Evil.<ts>`, bind-mounts it over `/usr/Evil/Evil` and restarts. Pages themselves are
+plain files: copy them to `/tmp/ui/` with `hrdev push` and point the Loader there (append `?<timestamp>` so Qt does not
+reuse a cached component). Before the first restart after a reboot, the serial shell must not have its working
+directory inside `usb_mnt` (the restart would fail to unmount the USB image). See [QML_PAGES.md](QML_PAGES.md).

@@ -29,6 +29,13 @@ set(NAM_BLOBS_GENERATED_SOURCES
   ${NAM_BLOBS_GENERATED_DIR}/blob_trampoline_gonk.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_pagepedal_usb_sh.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_reverb.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_tile.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam_fix.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal_art.c
+  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_rig_block.c
 )
 add_custom_command(
   OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_nam_hook.c
@@ -74,12 +81,73 @@ add_custom_command(
   VERBATIM
 )
 
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/pedal_ui.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal.c g_ui_pedal_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/pedal_ui.qml
+  COMMENT "Embedding pedal_ui.qml as a C byte array"
+  VERBATIM
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/nam_ui.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam.c g_ui_nam_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/nam_ui.qml
+  COMMENT "Embedding nam_ui.qml as a C byte array"
+  VERBATIM
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_reverb.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/reverb_ui.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_reverb.c g_ui_reverb_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/reverb_ui.qml
+  COMMENT "Embedding reverb_ui.qml as a C byte array"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_tile.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/EncoderParamInfo.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_tile.c g_ui_tile_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/EncoderParamInfo.qml
+  COMMENT "Embedding EncoderParamInfo.qml as a C byte array"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam_fix.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/nam_fix.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam_fix.c g_ui_nam_fix_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/nam_fix.qml
+  COMMENT "Embedding nam_fix.qml as a C byte array"
+  VERBATIM
+)
+
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal_art.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/pedal_art.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal_art.c g_ui_pedal_art_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/pedal_art.qml
+  COMMENT "Embedding pedal_art.qml as a C byte array"
+  VERBATIM
+)
+add_custom_command(
+  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_rig_block.c
+  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/rig_block.qml
+          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_rig_block.c g_ui_rig_block_qml
+  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/rig_block.qml
+  COMMENT "Embedding rig_block.qml as a C byte array"
+  VERBATIM
+)
+
 add_library(nam_gui_core STATIC
   core/model_targets.c
   core/fit_image.c
   core/elf_patch.c
   core/spy_patch.c
   core/qml_patch.c
+  core/qml_override.c
   core/ext4_image.c
   core/xz_codec.c
   core/launcher_script.c

@@ -10,6 +10,7 @@
 #include "nam_blobs_embedded.h"
 #include "page_pedal.h"
 #include "qml_patch.h"
+#include "qml_override.h"
 #include "xz_codec.h"
 
 #include <errno.h>
@@ -103,6 +104,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
   const bool enable_v2_hijack = opts->anxiety_hijack && opts->anxiety_v2;
   const bool enable_page_pedal = opts->page_pedal;
   const bool reverb_pedal = opts->nam_pedals && opts->reverb_pedal;
+  bool qml_pages = false;
   if (opts->reverb_pedal && !opts->nam_pedals)
   {
     set_err(err, err_size, "the Reverb pedals are built on the additive NAM pedals: enable them as well");
@@ -283,6 +285,24 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
            eng_hook_slot);
     if (reverb_pedal)
       report(progress, progress_user_data, "OK  Reverb pedals registered: \"Reverb\" and \"Reverb 2\" in the Reverb list (Dattorro plate)");
+
+    if (strcmp(target->name, "pedalboard") == 0)
+    {
+      if (!nam_qml_override_blockdetails(evil_data, evil_len, "file:///usr/Evil/Resources/pedal_ui.qml", err, err_size))
+        goto cleanup;
+      if (!nam_qml_override_encoder_tile(evil_data, evil_len, (const char*)g_ui_tile_qml, (size_t)g_ui_tile_qml_len, err,
+                                         err_size))
+        goto cleanup;
+      if (!nam_qml_override_encoder_field(evil_data, evil_len, err, err_size)
+          || !nam_qml_override_stomp(evil_data, evil_len, err, err_size))
+        goto cleanup;
+      qml_pages = true;
+      report(progress, progress_user_data,
+             "OK  detail pages: BlockDetails.qml loads /usr/Evil/Resources/pedal_ui.qml for the additive pedals; "
+             "EncoderParamInfo.qml shows their real parameter names on the tiles");
+    }
+    else
+      report(progress, progress_user_data, "    (NAM detail page skipped for %s -- Pedalboard only)", target->name);
   }
 
   if (enable_page_pedal && strcmp(target->name, "pedalboard") != 0)
@@ -354,6 +374,24 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     goto cleanup;
   report(progress, progress_user_data,
          "OK  injected patched Evil, libnam_hook.so, libnam_preload.so, launcher script");
+  if (qml_pages)
+  {
+    if (!nam_ext4_inject(img, "/usr/Evil/Resources/pedal_ui.qml", g_ui_pedal_qml, (size_t)g_ui_pedal_qml_len, 0644, err,
+                         err_size)
+        || !nam_ext4_inject(img, "/usr/Evil/Resources/nam_ui.qml", g_ui_nam_qml, (size_t)g_ui_nam_qml_len, 0644, err,
+                            err_size)
+        || !nam_ext4_inject(img, "/usr/Evil/Resources/nam_fix.qml", g_ui_nam_fix_qml, (size_t)g_ui_nam_fix_qml_len, 0644,
+                            err, err_size)
+        || !nam_ext4_inject(img, "/usr/Evil/Resources/pedal_art.qml", g_ui_pedal_art_qml, (size_t)g_ui_pedal_art_qml_len,
+                            0644, err, err_size)
+        || !nam_ext4_inject(img, "/usr/Evil/Resources/rig_block.qml", g_ui_rig_block_qml, (size_t)g_ui_rig_block_qml_len,
+                            0644, err, err_size)
+        || (reverb_pedal
+            && !nam_ext4_inject(img, "/usr/Evil/Resources/reverb_ui.qml", g_ui_reverb_qml, (size_t)g_ui_reverb_qml_len,
+                                0644, err, err_size)))
+      goto cleanup;
+    report(progress, progress_user_data, "OK  injected the detail pages (/usr/Evil/Resources/*_ui.qml)");
+  }
 
   if (!nam_ext4_verify_basic(img, err, err_size))
     goto cleanup;

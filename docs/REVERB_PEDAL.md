@@ -28,13 +28,15 @@ figure 1, written from the paper (no third-party code): `patch/dattorro_reverb.h
 
 ## Algorithms
 
-Three, in `patch/dattorro_reverb.h` and `patch/fdn_reverb.h`, run through `patch/reverb_unit.h`:
+Four on the page, plus Shimmer through the dev control. Code in `patch/dattorro_reverb.h`, `patch/fdn_reverb.h` and `patch/room_spring_reverb.h`, run through `patch/reverb_unit.h`:
 
 | Algorithm | What it is | Pick it with |
 |---|---|---|
-| **Plate** | Dattorro plate (above) | Gain Low (default) |
-| **Hall** | 8-line feedback delay network, Householder matrix, per-line RT60 gain and damping lowpass, modulated delays, 4 input diffusers. RT60 0.3 .. 14 s | Gain High |
-| **Shimmer** | The hall plus an octave-up pitch shifter in its feedback (through a soft limiter, feedback falls with decay so the loop stays stable) | dev control only so far (`algo shimmer`) |
+| **Plate** | Dattorro plate (above) | Hi-Cut On, Gain Low (default) |
+| **Hall** | 8-line feedback delay network, Householder matrix, per-line RT60 gain and damping lowpass, modulated delays, 4 input diffusers. RT60 0.3 .. 14 s | Hi-Cut On, Gain High |
+| **Room** | Small 8-line FDN with very short prime delays (4..14 ms), 2 input diffusers, 8 early-reflection taps (7..67 ms), barely modulated. RT60 0.15 .. 1.8 s | Hi-Cut Off, Gain Low |
+| **Spring** | Two spring tanks (L / R): feedback loops of a 32-section allpass dispersion chain (the chirp), a delay and a damping lowpass, fed from a dull input. RT60 0.6 .. 5 s | Hi-Cut Off, Gain High |
+| Shimmer | The hall plus an octave-up pitch shifter in its feedback (through a soft limiter). Not on the page | dev control only (`algo shimmer`) |
 
 Decay / mix / damping mean the same in all three. The Hall's wet level is compensated over a (decay, damping) grid so
 the decay knob is not also a volume knob (`reverb_lab --table`). Measured on the Mac (`patch/reverb_lab.cpp`):

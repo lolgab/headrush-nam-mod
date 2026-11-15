@@ -127,9 +127,11 @@ and the engine class. Relevant to display:
 
 ## Dead ends (do not retry)
 
-* **Changing the captions DRIVE / LEVEL / TONE.** The UI QML (and its compiled
-  cache) is embedded in `Evil`'s qrc. Patching the embedded QML is ignored on
-  hardware. Renaming the entries in the parameter-name table (experiment
+* **Changing the captions DRIVE / LEVEL / TONE.** Patching only the embedded
+  QML source is ignored on hardware because compiled units win; the way around
+  that is in [QML_PAGES.md](QML_PAGES.md) (the detail page now shows the model
+  number and name from one value). The captions themselves are still the
+  parameter names. Renaming the entries in the parameter-name table (experiment
   `--rename-params`, build v29: "Model" / "OutVol" / "InVol", registration
   blob copies the 7-word table into the RW tail and repoints it) keeps the old
   captions and **removes the numbers**: the editor looks parameters up by

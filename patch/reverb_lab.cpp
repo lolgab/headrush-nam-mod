@@ -16,6 +16,7 @@
 
 #include "dattorro_reverb.h"
 #include "fdn_reverb.h"
+#include "room_spring_reverb.h"
 
 namespace
 {
@@ -31,6 +32,8 @@ struct Algo
 dattorro::Reverb* g_plate = new dattorro::Reverb();
 fdn::Hall* g_hall = new fdn::Hall();
 fdn::Shimmer* g_shim = new fdn::Shimmer();
+room::Room* g_room = new room::Room();
+spring::Spring* g_spring = new spring::Spring();
 
 std::vector<Algo> algos()
 {
@@ -46,6 +49,14 @@ std::vector<Algo> algos()
       {"shimmer", [] { std::memset(g_shim, 0, sizeof *g_shim); g_shim->init(kFs); },
        [](float* const* i, float* const* o, uint32_t c, int32_t n, float m, float d, float t) {
          g_shim->process(i, o, c, n, m, d, t);
+       }},
+      {"room", [] { std::memset(g_room, 0, sizeof *g_room); g_room->init(kFs); },
+       [](float* const* i, float* const* o, uint32_t c, int32_t n, float m, float d, float t) {
+         g_room->process(i, o, c, n, m, d, t);
+       }},
+      {"spring", [] { std::memset(g_spring, 0, sizeof *g_spring); g_spring->init(kFs); },
+       [](float* const* i, float* const* o, uint32_t c, int32_t n, float m, float d, float t) {
+         g_spring->process(i, o, c, n, m, d, t);
        }},
   };
 }
@@ -193,7 +204,7 @@ void pluck(std::vector<float>& out, size_t start, double f0, double amp, std::mt
 
 // --table: measure the stationary-noise wet level of the Hall over the (decay, damping) grid and print the
 // corrected kComp block for fdn_reverb.h (paste it in, run again until the printed corrections are ~1.00)
-int table()
+int table(const std::string& which)
 {
   std::mt19937 rng(11);
   std::uniform_real_distribution<float> u(-1.0f, 1.0f);
@@ -201,7 +212,11 @@ int table()
   for (auto& x : in)
     x = 0.5f * u(rng);
   const double inp = rms_db(in, 0, in.size());
-  const Algo a = algos()[1];
+  const auto all = algos();
+  const Algo a = which == "room" ? all[3] : which == "spring" ? all[4] : all[1];
+  const auto comp = [&](int i, int j) {
+    return static_cast<double>(which == "room" ? room::Room::kComp[i][j] : which == "spring" ? spring::Spring::kComp[i][j] : fdn::Hall::kComp[i][j]);
+  };
   std::printf("  static constexpr float kComp[5][5] = {\n");
   for (int i = 0; i < 5; ++i)
   {
@@ -212,7 +227,7 @@ int table()
       run(a, in, l, r, 1.0f, 0.25f * static_cast<float>(i), 0.25f * static_cast<float>(j));
       const double lvl = 0.5 * (rms_db(l, in.size() / 2, in.size()) + rms_db(r, in.size() / 2, in.size())) - inp;
       const double fix = std::pow(10.0, (-1.0 - lvl) / 20.0);
-      std::printf("%.4ff%s", static_cast<double>(fdn::Hall::kComp[i][j]) * fix, j < 4 ? ", " : "");
+      std::printf("%.4ff%s", comp(i, j) * fix, j < 4 ? ", " : "");
     }
     std::printf("}%s\n", i < 4 ? "," : "};");
   }
@@ -223,7 +238,7 @@ int table()
 int main(int argc, char** argv)
 {
   if (argc > 1 && std::string(argv[1]) == "--table")
-    return table();
+    return table(argc > 2 ? argv[2] : "hall");
   const std::string dir = argc > 1 ? argv[1] : ".";
   int fails = 0;
   for (const Algo& a : algos())

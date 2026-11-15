@@ -9,6 +9,7 @@ lines and blank lines are dropped first if the new text does not fit) and the ta
 
   qml_patch.py extract <Evil> <outdir>
   qml_patch.py patch <Evil> <out.regions> --key /Pages/BlockDetails.qml --old '<text>' --new '<text>' [--old/--new ...]
+  qml_patch.py patch <Evil> <out.regions> --key <key> --old '<marker text>' --whole <new source file>
   qml_patch.py apply <regions.json>        (device: push regions, build /tmp/Evil.<ts>, bind-mount, restart)
 
 `patch` writes <out.regions>.json (list of {offset, file}) next to the binary region files; `apply` needs hrdev.
@@ -94,10 +95,12 @@ def fit(entry_off, comp, text, d):
 
 def cmd_patch(a):
     inp, outbase = a[0], a[1]
-    key, olds, news = None, [], []
+    key, olds, news, whole = None, [], [], None
     i = 2
     while i < len(a):
-        if a[i] == "--key":
+        if a[i] == "--whole":
+            whole = a[i + 1]
+        elif a[i] == "--key":
             key = a[i + 1]
         elif a[i] == "--old":
             olds.append(a[i + 1])
@@ -109,10 +112,13 @@ def cmd_patch(a):
     if len(hits) != 1:
         raise SystemExit("expected one entry containing all --old texts, found %d" % len(hits))
     o, c, t = hits[0]
-    for x, y in zip(olds, news):
-        if t.count(x) != 1:
-            raise SystemExit("--old must occur once: %r (%d)" % (x, t.count(x)))
-        t = t.replace(x, y)
+    if whole:  # --old texts only identify the entry; its whole source is replaced by the file
+        t = open(whole).read()
+    else:
+        for x, y in zip(olds, news):
+            if t.count(x) != 1:
+                raise SystemExit("--old must occur once: %r (%d)" % (x, t.count(x)))
+            t = t.replace(x, y)
     off, body = fit(o, c, t, d)
     regions = [(off, body), (find_key(d, key), b"x")]
     os.makedirs(os.path.dirname(os.path.abspath(outbase)) or ".", exist_ok=True)
@@ -135,7 +141,9 @@ def cmd_apply(a):
     restart = "--no-restart" not in a
     stamp = int(time.time())
     T = "/tmp/Evil.%d" % stamp
-    print(hr("sh", "umount -l /usr/Evil/Evil 2>/dev/null; cp /usr/Evil/Evil %s && chmod 755 %s && echo copied" % (T, T)).strip())
+    # every earlier apply left a bind mount on top: drop them all so the copy is the flashed binary, not a patched layer
+    print(hr("sh", "while mount | grep -q ' /usr/Evil/Evil '; do umount -l /usr/Evil/Evil || break; done; "
+             "rm -f /tmp/Evil.[0-9]* /tmp/qp*.bin; cp /usr/Evil/Evil %s && chmod 755 %s && echo copied" % (T, T)).strip())
     for n, m in enumerate(meta):
         rf = "/tmp/qp%d.bin" % n
         want = hashlib.md5(open(m["file"], "rb").read()).hexdigest()

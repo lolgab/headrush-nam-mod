@@ -68,9 +68,6 @@
 #include <mutex>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <ucontext.h>
 #include <string>
 #include <sys/resource.h>
 #include <sys/uio.h>
@@ -380,7 +377,8 @@ void preload_models_in_background()
     {
       if (ec)
         break;
-      if (!entry.is_regular_file(ec))
+      std::error_code fec; // not `ec`: a failing stat on one entry must not end the whole scan at the check above
+      if (!entry.is_regular_file(fec))
         continue;
       // Skip macOS AppleDouble sidecar files ("._realname.nam") -- Finder
       // creates these alongside real files when copying to a FAT/exFAT USB
@@ -415,12 +413,19 @@ void preload_models_in_background()
         { auto discard = nam::get_dsp(j); }
         found.push_back(CachedModel{filename, std::move(j)});
       }
-      catch (...)
+      catch (const std::exception& e)
       {
         // Bad/corrupt file -- skip it, don't let one bad file block every
         // other model from loading.
+        std::fprintf(stderr, "[nam_models] skipped %s: %s\n", filename.c_str(), e.what());
+      }
+      catch (...)
+      {
+        std::fprintf(stderr, "[nam_models] skipped %s: unreadable\n", filename.c_str());
       }
     }
+    std::fprintf(stderr, "[nam_models] %zu usable .nam files in %s%s%s\n", found.size(), model_dir().c_str(),
+                 ec ? " (scan error: " : "", ec ? ec.message().c_str() : "");
 
     std::sort(found.begin(), found.end(),
               [](const CachedModel& a, const CachedModel& b) { return a.display_name < b.display_name; });
@@ -1901,7 +1906,8 @@ std::vector<std::string> drive_names()
       if (ec)
         break;
       const std::string fn = entry.path().filename().string();
-      if (fn.rfind("._", 0) == 0 || !entry.is_regular_file(ec))
+      std::error_code fec;
+      if (fn.rfind("._", 0) == 0 || !entry.is_regular_file(fec))
         continue;
       std::string ext = entry.path().extension().string();
       std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
@@ -1912,6 +1918,47 @@ std::vector<std::string> drive_names()
     at = now;
   }
   return quick;
+}
+
+// The text shown for a model file: no ".nam", no "NNN - " ordering prefix
+std::string model_label(std::string name)
+{
+  if (name.size() > 4 && lower(name.substr(name.size() - 4)) == ".nam")
+    name.resize(name.size() - 4);
+  if (name.size() > 6 && std::isdigit(static_cast<unsigned char>(name[0])) && name.compare(3, 3, " - ") == 0)
+    name.erase(0, 6);
+  return name;
+}
+
+// The detail pages (ui/nam_ui.qml, loaded from /usr/Evil/Resources) show the model name next to the number from the
+// very same Drive value, so the name cannot lag. Qt's QML here has no XMLHttpRequest: the list is a tiny QML file the
+// page loads with a Loader. Rewritten (atomically) only when the list changes.
+void publish_model_names(const std::vector<std::string>& names)
+{
+  static std::string last;
+  std::string qml = "import QtQuick 2.2\nQtObject { property var names: [";
+  for (const auto& n : names)
+  {
+    qml += '"';
+    for (char c : model_label(n))
+    {
+      if (c == '"' || c == '\\')
+        qml += '\\';
+      if (static_cast<unsigned char>(c) >= 0x20)
+        qml += c;
+    }
+    qml += "\",";
+  }
+  qml += "] }\n";
+  if (qml == last)
+    return;
+  const char* const tmp = "/tmp/nam_models.qml.tmp";
+  if (FILE* f = std::fopen(tmp, "w"))
+  {
+    const bool ok = std::fwrite(qml.data(), 1, qml.size(), f) == qml.size();
+    if (std::fclose(f) == 0 && ok && std::rename(tmp, "/tmp/nam_models.qml") == 0)
+      last = qml;
+  }
 }
 
 // Drive as a plain model number 1..n: the editor's own number formatter needs no per-value text, so nothing can lag
@@ -1928,11 +1975,7 @@ bool set_desc_index(uintptr_t desc, const std::vector<std::string>& names)
   if (n > 0 && val >= 0.0f && val <= 1.0f)
   {
     const int z = std::clamp(static_cast<int>(std::lround(val * static_cast<float>(n - 1))), 0, n - 1);
-    std::string name = names[static_cast<size_t>(z)];
-    if (name.size() > 4 && lower(name.substr(name.size() - 4)) == ".nam")
-      name.resize(name.size() - 4);
-    if (name.size() > 6 && std::isdigit(static_cast<unsigned char>(name[0])) && name.compare(3, 3, " - ") == 0)
-      name.erase(0, 6);
+    const std::string name = model_label(names[static_cast<size_t>(z)]);
     f += ' ';
     for (char c : name)
     {
@@ -2204,6 +2247,7 @@ void display_watcher()
     report_engine_stats();
     last_val.clear(); // re-verify every desc once per pass (a recreated desc may sit at the same address)
     const auto fast_names = drive_names();
+    publish_model_names(fast_names);
     for (int sub = 0; sub < (loops < 1000 ? 30 : 250); ++sub)
     {
       usleep(2 * 1000);
@@ -2378,6 +2422,7 @@ void display_watcher()
     // the props are patched wherever they are found, the engines only need the flag)
     bool any_level = false, any_tone = false, all_db = true;
     const auto names_now = drive_names();
+    publish_model_names(names_now);
     const int n_models = static_cast<int>(names_now.size());
     for (const auto& b : bound)
     {
@@ -2602,8 +2647,18 @@ extern "C" void nam_eng_record(void* eng, const void* name)
   std::fprintf(stderr, "[nam_eng] record engine %p name size %u -> %s\n", eng, size, reverb ? "Reverb" : "other");
 }
 
-// Which algorithm a Reverb pedal runs when nothing overrides it: Gain Low = plate, Gain High = hall.
-static int default_reverb_algo(const uint8_t* eng) { return eng[0x57c] != 0 ? reverb::kHall : reverb::kPlate; }
+// Which algorithm a Reverb pedal runs when nothing overrides it. Two switches that the stock pedal already saves with
+// the preset: Hi-Cut (byte 0x57f, On by default) and Gain (byte 0x57c, Low by default):
+//   Hi-Cut On : Gain Low = plate, Gain High = hall        Hi-Cut Off: Gain Low = room, Gain High = spring
+// The detail page (ui/reverb_ui.qml) shows the result and sets both switches from four buttons. Shimmer is not on
+// the page; it stays reachable through the dev control (`algo shimmer`).
+static int default_reverb_algo(const uint8_t* eng)
+{
+  const bool high = eng[0x57c] != 0;
+  if (eng[0x57f] == 0)
+    return high ? reverb::kSpring : reverb::kRoom;
+  return high ? reverb::kHall : reverb::kPlate;
+}
 
 // ---- dev control: drive the Reverb pedals without touching the device (tools/hrdev.py) -----------------------------
 // A control thread polls /tmp/nam_ctl; the shell writes commands there (one per line, written to a temp file and
@@ -2994,255 +3049,8 @@ static void reverb_process(void* eng, float** input, uint32_t numChannels, float
   }
 }
 
-// Bring-up tracer (only with /tmp/nam_dtortrace): logs the last calls of one Evil destructor (0x7b11c, the one the
-// crash on the 6-id build ends in) into a ring that crash_dump() prints, naming the class through its RTTI.
-struct DtorRec
-{
-  uint32_t obj, vt, p10, lr;
-};
-static DtorRec g_dtor_ring[32];
-static std::atomic<uint32_t> g_dtor_n{0};
-extern "C" void nam_dtor_log(uint32_t obj, uint32_t lr)
-{
-  DtorRec& r = g_dtor_ring[g_dtor_n.fetch_add(1) % 32];
-  r.obj = obj;
-  r.lr = lr;
-  r.vt = r.p10 = 0;
-  safe_read(obj, &r.vt, 4);
-  safe_read(obj + 0x10, &r.p10, 4);
-}
-extern "C" void nam_dtor_tramp();
-asm(".text\n.global nam_dtor_tramp\n.type nam_dtor_tramp,%function\nnam_dtor_tramp:\n"
-    "push {r0-r3,r12,lr}\nmov r1, lr\nbl nam_dtor_log\npop {r0-r3,r12,lr}\n"
-    "str r4, [sp, #-8]!\nmov r4, r0\nldr pc, [pc, #-4]\n.word 0x7b124\n");
-static void install_dtor_trace()
-{
-  uint32_t w0, w1;
-  if (!safe_read(0x7b11c, &w0, 4) || !safe_read(0x7b120, &w1, 4) || w0 != 0xe52d4008u || w1 != 0xe1a04000u)
-  {
-    std::fprintf(stderr, "[nam_crash] dtor trace: unexpected code at 0x7b11c, not installed\n");
-    return;
-  }
-  const uintptr_t pg = 0x7b000;
-  if (mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-    return;
-  auto* code = reinterpret_cast<volatile uint32_t*>(0x7b11c);
-  code[1] = reinterpret_cast<uint32_t>(&nam_dtor_tramp);
-  code[0] = 0xe51ff004u; // ldr pc, [pc, #-4]
-  __builtin___clear_cache(reinterpret_cast<char*>(0x7b11c), reinterpret_cast<char*>(0x7b124));
-  mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_EXEC);
-  std::fprintf(stderr, "[nam_crash] dtor trace installed\n");
-}
-
-// Bring-up tracer for the registry object (only with /tmp/nam_ctortrace): right after Evil constructs it (0x3fb790
-// `bl 0x624ef0`, object in r5), dump the words around the end of its in-object prototype table (+0x150, 4 bytes per
-// type id), to see what the extra ids overlay.
-extern "C" size_t malloc_usable_size(void*);
-extern "C" void nam_ctor_log(uint32_t obj)
-{
-  std::fprintf(stderr, "[nam_ctor] obj=%#x usable=%zu\n", obj, malloc_usable_size(reinterpret_cast<void*>(obj)));
-  for (uint32_t off = 0x3b0; off < 0x4b0; off += 16)
-  {
-    uint32_t w[4] = {0, 0, 0, 0};
-    for (int i = 0; i < 4; ++i)
-      safe_read(obj + off + 4 * i, &w[i], 4);
-    std::fprintf(stderr, "[nam_ctor] +%#x: %08x %08x %08x %08x\n", off, w[0], w[1], w[2], w[3]);
-  }
-}
-extern "C" void nam_ctor_tramp();
-asm(".text\n.global nam_ctor_tramp\n.type nam_ctor_tramp,%function\nnam_ctor_tramp:\n"
-    "mov r0, r5\nbl nam_ctor_log\nadd r0, r5, #0x44\nldr r12, [pc, #4]\nblx r12\nldr pc, [pc, #0]\n"
-    ".word 0x5481e0\n.word 0x3fb79c\n");
-static void install_ctor_trace()
-{
-  uint32_t w0, w1;
-  if (!safe_read(0x3fb794, &w0, 4) || !safe_read(0x3fb798, &w1, 4) || w0 != 0xe2850044u)
-  {
-    std::fprintf(stderr, "[nam_ctor] unexpected code at 0x3fb794 (%08x %08x), not installed\n", w0, w1);
-    return;
-  }
-  const uintptr_t pg = 0x3fb000;
-  if (mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC) != 0)
-    return;
-  auto* code = reinterpret_cast<volatile uint32_t*>(0x3fb794);
-  code[1] = reinterpret_cast<uint32_t>(&nam_ctor_tramp);
-  code[0] = 0xe51ff004u; // ldr pc, [pc, #-4]
-  __builtin___clear_cache(reinterpret_cast<char*>(0x3fb794), reinterpret_cast<char*>(0x3fb79c));
-  mprotect(reinterpret_cast<void*>(pg), 0x1000, PROT_READ | PROT_EXEC);
-  std::fprintf(stderr, "[nam_ctor] trace installed\n");
-}
-
-// Walks the main heap chunk by chunk (glibc layout: size word at ptr-4, low 3 bits flags) and reports the first chunk whose
-// size is impossible, with the chunks before it: the one right before it overflowed. Names the owner through the RTTI
-// of a leading vtable pointer when it has one.
-static void heap_walk_report(uintptr_t where)
-{
-  uintptr_t hs = 0, he = 0;
-  if (FILE* f = std::fopen("/proc/self/maps", "r"))
-  {
-    char line[256];
-    while (std::fgets(line, sizeof(line), f))
-    {
-      unsigned long a, b;
-      if (std::sscanf(line, "%lx-%lx", &a, &b) == 2 && where >= a && where < b)
-      {
-        hs = a;
-        he = b;
-        break;
-      }
-    }
-    std::fclose(f);
-  }
-  if (!hs)
-  {
-    std::fprintf(stderr, "[nam_heap] no mapping holds %#lx\n", static_cast<unsigned long>(where));
-    return;
-  }
-  std::fprintf(stderr, "[nam_heap] heap %#lx-%#lx\n", static_cast<unsigned long>(hs), static_cast<unsigned long>(he));
-
-  uintptr_t c = hs; // chunk header address; the first chunk of the main arena starts at the heap start
-  while (c + 8 < he) // skip a possible arena header: first position with a plausible size word
-  {
-    uint32_t sz0;
-    if (safe_read(c + 4, &sz0, 4) && (sz0 & ~7u) >= 16 && (sz0 & ~7u) < 0x100000 && (sz0 & 1))
-      break;
-    c += 8;
-  }
-  {
-    uint32_t w[16] = {0};
-    for (int i = 0; i < 16; ++i)
-      safe_read(where - 16 + 4 * i, &w[i], 4);
-    std::fprintf(stderr, "[nam_heap] around bad ptr %#lx:", static_cast<unsigned long>(where));
-    for (int i = 0; i < 16; ++i)
-      std::fprintf(stderr, " %08x", w[i]);
-    std::fprintf(stderr, "\n[nam_heap] walk starts at %#lx\n", static_cast<unsigned long>(c));
-  }
-  uintptr_t hist[6] = {0, 0, 0, 0, 0, 0};
-  uint32_t hsz[6] = {0, 0, 0, 0, 0, 0};
-  uint32_t n = 0;
-  while (c + 8 <= he && n < 3000000)
-  {
-    uint32_t sz;
-    if (!safe_read(c + 4, &sz, 4))
-      break;
-    const uint32_t csz = sz & ~7u;
-    if (csz < 16 || (csz & 7) || c + csz > he + 8)
-    {
-      std::fprintf(stderr, "[nam_heap] BAD chunk at %#lx size word %#x after %u chunks\n", static_cast<unsigned long>(c), sz, n);
-      for (int k = 0; k < 6; ++k)
-      {
-        const uintptr_t pc = hist[(n + k) % 6];
-        if (!pc)
-          continue;
-        uint32_t w[8] = {0};
-        for (int i = 0; i < 8; ++i)
-          safe_read(pc + 8 + 4 * i, &w[i], 4);
-        uint32_t ti = 0, nm = 0;
-        char name[64] = "";
-        if (w[0] >= 4 && safe_read(w[0] - 4, &ti, 4) && ti && safe_read(ti + 4, &nm, 4) && nm)
-        {
-          size_t i = 0;
-          for (; i + 1 < sizeof(name); ++i)
-          {
-            char ch;
-            if (!safe_read(nm + i, &ch, 1) || !ch)
-              break;
-            name[i] = ch;
-          }
-          name[i] = 0;
-        }
-        std::fprintf(stderr, "[nam_heap]  prev chunk %#lx size %u: %08x %08x %08x %08x %08x %08x %s\n",
-                     static_cast<unsigned long>(pc), hsz[(n + k) % 6], w[0], w[1], w[2], w[3], w[4], w[5], name);
-      }
-      return;
-    }
-    hist[n % 6] = c;
-    hsz[n % 6] = csz;
-    ++n;
-    c += csz;
-  }
-  std::fprintf(stderr, "[nam_heap] walked %u chunks, heap consistent up to %#lx\n", n, static_cast<unsigned long>(c));
-}
-
-// Crash diagnostics: on SIGABRT / SIGSEGV print the registers and every stack word that points into Evil's code, so a
-// crash on the device (journal) can be mapped with tools/evil_xref.py without a debugger.
-static void crash_dump(int sig, siginfo_t*, void* uc_)
-{
-  auto* uc = static_cast<ucontext_t*>(uc_);
-  const auto& r = uc->uc_mcontext;
-  std::fprintf(stderr, "[nam_crash] signal %d pc=%#lx lr=%#lx sp=%#lx fp=%#lx\n", sig,
-               static_cast<unsigned long>(r.arm_pc), static_cast<unsigned long>(r.arm_lr),
-               static_cast<unsigned long>(r.arm_sp), static_cast<unsigned long>(r.arm_fp));
-  {
-    char path[64], comm[32] = "?";
-    std::snprintf(path, sizeof(path), "/proc/self/task/%ld/comm", static_cast<long>(syscall(SYS_gettid)));
-    if (FILE* f = std::fopen(path, "r"))
-    {
-      if (!std::fgets(comm, sizeof(comm), f))
-        std::strcpy(comm, "?");
-      std::fclose(f);
-    }
-    std::fprintf(stderr, "[nam_crash] thread %ld comm=%s", static_cast<long>(syscall(SYS_gettid)), comm);
-  }
-  for (uint32_t k = 0, n = g_dtor_n.load(); k < 32 && k < n; ++k)
-  {
-    const DtorRec& d = g_dtor_ring[(n - 1 - k) % 32];
-    uint32_t ti = 0, nm = 0;
-    char name[80] = "?";
-    if (d.vt >= 4 && safe_read(d.vt - 4, &ti, 4) && ti && safe_read(ti + 4, &nm, 4) && nm)
-    {
-      size_t i = 0;
-      for (; i + 1 < sizeof(name); ++i)
-      {
-        char c;
-        if (!safe_read(nm + i, &c, 1) || !c)
-          break;
-        name[i] = c;
-      }
-      name[i] = 0;
-    }
-    std::fprintf(stderr, "[nam_crash] dtor#%u obj=%#x vt=%#x p10=%#x lr=%#x %s\n", n - 1 - k, d.obj, d.vt, d.p10,
-                 d.lr, name);
-  }
-  const uint32_t* sp = reinterpret_cast<const uint32_t*>(r.arm_sp);
-  int shown = 0;
-  for (int i = 0; i < 4096 && shown < 80; ++i)
-  {
-    uint32_t w;
-    if (!safe_read(reinterpret_cast<uintptr_t>(sp + i), &w, 4))
-      break;
-    uint32_t prev;
-    // a real return address: the word before it is a `bl` or `blx reg`
-    if (w >= 0x10000 && w < 0x3300000 && (w & 3) == 0 && safe_read(w - 4, &prev, 4)
-        && ((prev & 0x0f000000u) == 0x0b000000u || (prev & 0x0ffffff0u) == 0x012fff30u))
-    {
-      std::fprintf(stderr, "[nam_crash] sp+%d: %#x\n", i * 4, w);
-      ++shown;
-    }
-  }
-  heap_walk_report(g_dtor_n.load() ? g_dtor_ring[(g_dtor_n.load() - 1) % 32].p10 : 0);
-  signal(sig, SIG_DFL);
-  raise(sig);
-}
-
-__attribute__((constructor)) static void nam_bringup_ctor()
-{
-  if (access("/tmp/nam_ctortrace", F_OK) == 0)
-    install_ctor_trace();
-  if (access("/tmp/nam_dtortrace", F_OK) == 0)
-    install_dtor_trace();
-}
-
 extern "C" void nam_eng_init(const uint32_t* triples, uint32_t count, void* builder)
 {
-  {
-    struct sigaction sa;
-    std::memset(&sa, 0, sizeof(sa));
-    sa.sa_sigaction = crash_dump;
-    sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGABRT, &sa, nullptr);
-    sigaction(SIGSEGV, &sa, nullptr);
-  }
   g_disp.latest_builder.store(reinterpret_cast<uintptr_t>(builder));
   bool expected = false;
   if (!g_disp.started.compare_exchange_strong(expected, true))
@@ -3253,11 +3061,6 @@ extern "C" void nam_eng_init(const uint32_t* triples, uint32_t count, void* buil
     g_disp.triples.push_back(Triple{triples[3 * i], triples[3 * i + 1], triples[3 * i + 2]});
   std::fprintf(stderr, "[nam_disp] init: builder=%p triples=%u eng_tab=%#lx\n", builder, count,
                static_cast<unsigned long>(g_disp.eng_tab));
-  // bring-up switches: files in /tmp that turn pieces off (debugging a crash on the device without a rebuild)
-  if (access("/tmp/nam_nowatch", F_OK) != 0)
-    spawn_detached([]() { display_watcher(); });
-  else
-    std::fprintf(stderr, "[nam_disp] display watcher disabled (/tmp/nam_nowatch)\n");
-  if (access("/tmp/nam_nodevctl", F_OK) != 0)
-    nam_devctl_start();
+  spawn_detached([]() { display_watcher(); });
+  nam_devctl_start();
 }
