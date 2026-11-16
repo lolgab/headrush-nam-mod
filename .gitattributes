@@ -1,0 +1,6 @@
+# Text payloads embedded with bin2c are installed on the device byte for
+# byte, so they must keep LF endings on every checkout. GitHub's Windows
+# runners check out with core.autocrlf, which otherwise turns
+# patch/pagepedal-usb.sh into "#!/bin/sh\r" and the device can't run it.
+*.sh text eol=lf
+*.qml text eol=lf
