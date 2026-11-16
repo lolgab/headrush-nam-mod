@@ -16,13 +16,8 @@ NAM, so existing pedalboards that use it keep working. See below.
    [GitHub Releases page](https://github.com/lolgab/headrush-nam-mod/releases).
    **Windows**: it's a `.zip` — unzip it and keep the `.exe` together with
    the `.dll` files next to it; they're required, not optional.
-   **macOS**: it dynamically links SDL2 (and, on Intel Macs, curl and xz
-   too) from Homebrew — install whichever your Mac needs before running it:
-   - **Apple Silicon**: `brew install sdl2`
-   - **Intel**: `brew install curl xz sdl2`
-
-   Without these, `headrush-nam-gui` fails to launch with a
-   `Library not loaded` error.
+   **macOS**: one universal binary (Apple Silicon and Intel), nothing
+   else to install.
 2. Run it, pick your model (Pedalboard, MX5, or Gigboard), and click **Install
    NAM Mod** — it downloads the official HeadRush firmware updater and builds
    a patched copy of it in the current directory. On the Pedalboard it adds the

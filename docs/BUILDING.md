@@ -87,7 +87,12 @@ cmake --build build
 Requires `e2fsprogs` (libext2fs), `xz` (liblzma), `curl` (libcurl), and
 `sdl2` dev packages -- `brew install e2fsprogs xz curl sdl2` on macOS,
 `apt install e2fslibs-dev liblzma-dev libcurl4-openssl-dev libsdl2-dev`
-(package names vary by distro) on Linux. If SDL2 isn't found, the
+(package names vary by distro) on Linux. On macOS you can skip Homebrew
+(and must, for an x86_64 build -- Homebrew no longer installs on Intel):
+`./scripts/build_deps_macos.sh <arm64|x86_64>` builds them as static libs
+and writes `build/deps-macos-<arch>/deps.cmake`; pass it as
+`cmake -C build/deps-macos-<arch>/deps.cmake -S . -B build`, which is how
+CI builds the self-contained release binary. If SDL2 isn't found, the
 `headrush-nam-gui` target is skipped with a warning and `gui-core-cli`
 still builds. Also requires **Docker running** the first time (or
 whenever `patch/*.cpp`/`nam_core` changes) to (re)build `blobs/*` -- see

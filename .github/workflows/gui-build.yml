@@ -120,31 +120,21 @@ jobs:
           name: headrush-nam-gui-linux
           path: build/headrush-nam-gui-linux.tar.gz
 
-  # macos-latest is an Apple Silicon (arm64) runner, so getting a real
-  # x86_64 build too (for Intel Macs) means building twice and lipo-ing the
-  # results together -- Homebrew itself has no cross-arch support. The
-  # x86_64 pass runs under Rosetta 2 with its OWN Homebrew prefix at
-  # /usr/local (the traditional Intel path, kept separate from the native
-  # arm64 install at /opt/homebrew) -- `arch -x86_64` re-execs everything
-  # (brew, cmake, the compiler) via their own x86_64 slices, which
-  # transparently produces genuine x86_64 objects with no cross-compile
-  # flags needed.
+  # macos-latest is an Apple Silicon (arm64) runner; the release binary is
+  # universal (arm64 + x86_64 for Intel Macs), built once per arch and
+  # lipo-ed together. Dependencies (xz, e2fsprogs, SDL2) are built from
+  # source as static libs per arch by scripts/build_deps_macos.sh -- not
+  # Homebrew: Homebrew no longer installs on x86_64 at all ("Homebrew on
+  # macOS is only supported on Apple Silicon processors!", even under
+  # Rosetta), and statically linking means the binary needs nothing
+  # installed on the user's Mac. curl comes from the macOS SDK itself.
   #
-  # Once both Homebrew prefixes exist side by side, CMakeLists.txt's
-  # find_path/find_library calls for curl/lzma/e2fsprogs/SDL2 can resolve
-  # to EITHER arch's dylib (their PATHS lists check both
-  # /opt/homebrew/opt/<pkg> and /usr/local/opt/<pkg>, for regular
-  # single-arch dev machines). CMAKE_IGNORE_PATH does NOT reliably filter
-  # this -- confirmed the hard way: a real macos-latest run still linked
-  # /opt/homebrew's arm64 libSDL2 into the "x86_64" build via
-  # find_package(SDL2)'s own resolution despite CMAKE_IGNORE_PATH listing
-  # every /opt/homebrew path involved. Fix: preset every dependency
-  # variable explicitly via -D on the x86_64 configure line (plus
-  # -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON to force SDL2's find_package
-  # short-circuit off, so the manual find_path/find_library fallback runs)
-  # -- CMake never re-searches a variable already present in the cache, so
-  # this is fully deterministic regardless of what's on disk at either
-  # prefix.
+  # The script writes a deps.cmake initial cache presetting EVERY
+  # dependency variable (plus CMAKE_DISABLE_FIND_PACKAGE_SDL2) -- CMake
+  # never re-searches a variable already in the cache, so whatever the
+  # runner has preinstalled under /opt/homebrew can't leak into either
+  # build (it used to: a real run linked /opt/homebrew's arm64 libSDL2
+  # into the "x86_64" build via find_package(SDL2)).
   build-macos:
     needs: build-blobs
     runs-on: macos-latest
@@ -158,54 +148,33 @@ jobs:
 
       - run: touch blobs/*
 
-      - name: Install arm64 dependencies
-        run: brew install e2fsprogs xz curl sdl2
-
-      - name: Build (arm64, native)
+      - name: Build static dependencies (arm64 + x86_64)
         run: |
-          cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release
+          ./scripts/build_deps_macos.sh arm64 "$PWD/deps-arm64"
+          ./scripts/build_deps_macos.sh x86_64 "$PWD/deps-x86_64"
+
+      - name: Build (arm64)
+        run: |
+          cmake -C deps-arm64/deps.cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release
           cmake --build build-arm64 --target headrush-nam-gui --parallel
 
-      - name: Install Rosetta 2
-        run: softwareupdate --install-rosetta --agree-to-license || true
-
-      - name: Install x86_64 Homebrew + dependencies
+      - name: Build (x86_64)
         run: |
-          if [ ! -x /usr/local/bin/brew ]; then
-            arch -x86_64 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-          fi
-          arch -x86_64 /usr/local/bin/brew install cmake e2fsprogs xz curl sdl2
-
-      - name: Build (x86_64, under Rosetta)
-        run: |
-          # The system/PATH `cmake` here is arm64-only (no x86_64 slice --
-          # `arch -x86_64 cmake` fails with "Bad CPU type in executable"),
-          # so use the x86_64 Homebrew's own cmake explicitly. cc/clang
-          # (invoked by cmake/ninja as this runs) IS a universal Apple
-          # binary, so the `arch -x86_64` wrapper here still matters -- it's
-          # inherited by the whole child process tree, including those
-          # compiler invocations.
-          arch -x86_64 /usr/local/bin/cmake -S . -B build-x86_64 -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_DISABLE_FIND_PACKAGE_SDL2=ON \
-            -DCURL_INCLUDE_DIR=/usr/local/opt/curl/include \
-            -DCURL_LIBRARY=/usr/local/opt/curl/lib/libcurl.dylib \
-            -DLZMA_INCLUDE_DIR=/usr/local/opt/xz/include \
-            -DLZMA_LIBRARY=/usr/local/opt/xz/lib/liblzma.dylib \
-            -DE2FSPROGS_INCLUDE_DIR=/usr/local/opt/e2fsprogs/include \
-            -DE2FSPROGS_ext2fs_LIBRARY=/usr/local/opt/e2fsprogs/lib/libext2fs.a \
-            -DE2FSPROGS_e2p_LIBRARY=/usr/local/opt/e2fsprogs/lib/libe2p.a \
-            -DE2FSPROGS_com_err_LIBRARY=/usr/local/opt/e2fsprogs/lib/libcom_err.a \
-            -DE2FSPROGS_blkid_LIBRARY=/usr/local/opt/e2fsprogs/lib/libblkid.a \
-            -DE2FSPROGS_uuid_LIBRARY=/usr/local/opt/e2fsprogs/lib/libuuid.a \
-            -DSDL2_INCLUDE_DIRS=/usr/local/include/SDL2 \
-            -DSDL2_LIBRARIES=/usr/local/lib/libSDL2.dylib
-          arch -x86_64 /usr/local/bin/cmake --build build-x86_64 --target headrush-nam-gui --parallel
+          cmake -C deps-x86_64/deps.cmake -S . -B build-x86_64 -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-x86_64 --target headrush-nam-gui --parallel
 
       - name: Create universal binary
         run: |
           lipo -create -output build-arm64/headrush-nam-gui-macos \
             build-arm64/headrush-nam-gui build-x86_64/headrush-nam-gui
           lipo -info build-arm64/headrush-nam-gui-macos
+          # Must be self-contained: only /usr/lib and /System dylibs.
+          for arch in arm64 x86_64; do
+            if otool -arch "$arch" -L build-arm64/headrush-nam-gui-macos | tail -n +2 | grep -vE '^[[:space:]]*(/usr/lib/|/System/)'; then
+              echo "$arch slice links non-system dylibs (above)" >&2
+              exit 1
+            fi
+          done
 
       # Same as the Linux job -- GitHub Releases strips exec bit from raw
       # assets, tar preserves it.

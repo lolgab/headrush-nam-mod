@@ -2,15 +2,16 @@
 
 This project's own code (patch scripts, glue code, `headrush-nam-gui`) is
 licensed under the [GNU GPLv3](LICENSE). It statically links, vendors, or
-(on Windows only) redistributes the components listed below. Each is under
+(on Windows) redistributes the components listed below. Each is under
 its own license, reproduced in full here. This file is bundled in every
 release artifact (Linux/macOS tarball, Windows zip).
 
 Sections marked **(Windows only)** cover DLLs shipped solely in
 `headrush-nam-gui-windows.zip`, because those runtime libraries aren't
-present on a stock Windows install. On Linux and macOS the equivalent
+present on a stock Windows install. The macOS binary statically links
+SDL2 and liblzma (and uses the OS's own libcurl). On Linux the equivalent
 libraries are dynamically linked against packages the user installs
-themselves (`apt`/Homebrew) and are not redistributed by this project.
+themselves (`apt`) and are not redistributed by this project.
 
 ---
 
@@ -543,7 +544,7 @@ reproduce the per-image hash `mkimage` computes when packing a FIT image
 
 ---
 
-## SDL2 (Windows only: `SDL2.dll`)
+## SDL2 (Windows: `SDL2.dll`; macOS: statically linked)
 
 [SDL2](https://www.libsdl.org), Copyright (C) 1997-2025 Sam Lantinga and
 the SDL contributors. zlib License.
@@ -591,14 +592,14 @@ copyright holder.
 
 ---
 
-## xz / liblzma (Windows only: `liblzma-5.dll`)
+## xz / liblzma (Windows: `liblzma-5.dll`; macOS: statically linked)
 
 [xz-utils](https://tukaani.org/xz/) / liblzma, by Lasse Collin and Igor
 Pavlov and other contributors. liblzma itself is public domain: to the
 extent possible under law, the authors have waived all copyright and
 related or neighboring rights. See the upstream `COPYING` file for the
 handful of ancillary files (docs/build scripts) under other permissive
-terms; none of those are compiled into `liblzma-5.dll`.
+terms; none of those are compiled into liblzma.
 
 ---
 
