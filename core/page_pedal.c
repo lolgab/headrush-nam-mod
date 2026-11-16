@@ -350,6 +350,13 @@ bool nam_page_pedal_install(Ext4Image* img, const uint8_t* daemon, size_t daemon
   static const char* const scripts[] = {"usb-otg-audio-start.sh", "usb-otg-audio-stop.sh", "setup-mass-storage.sh",
                                         "remove-mass-storage.sh"};
 
+  /* a CRLF checkout (core.autocrlf on Windows) would embed "#!/bin/sh\r", which the device can't run */
+  if (memchr(g_pagepedal_usb_sh, '\r', (size_t)g_pagepedal_usb_sh_len))
+  {
+    set_err(err, err_size, "embedded pagepedal-usb.sh has CRLF line endings; rebuild from an LF checkout");
+    return false;
+  }
+
   /* patch everything first so a layout mismatch fails before we inject anything */
   for (size_t i = 0; i < sizeof(scripts) / sizeof(scripts[0]); ++i)
   {
