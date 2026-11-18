@@ -355,6 +355,12 @@ bool nam_win_repack_updater(const char* stock_exe_path, const uint8_t* patched_i
   size_t archive_start = (size_t)marker_idx + strlen(SFX_END_MARKER);
 
   uint8_t* sfx_prefix = (uint8_t*)malloc(archive_start);
+  if (!sfx_prefix)
+  {
+    set_err(err, err_size, "out of memory (%zu bytes)", archive_start);
+    free(stock_data);
+    return false;
+  }
   memcpy(sfx_prefix, stock_data, archive_start);
   if (!nam_pe_strip_authenticode_directory(sfx_prefix, archive_start, err, err_size))
   {
