@@ -188,6 +188,26 @@ bool nam_elf_patch_gonkulator(uint8_t* data, size_t data_len, const uint8_t tram
     free(phdrs);
     return false;
   }
+  /* FIX (found during review, not yet seen fail in practice): every other
+   * REFUSING check in this function treats an unexpected binary layout as
+   * fatal, but nothing validated that phdrs[next_idx].p_offset -- read
+   * straight from the file and used below both as a loop bound (the
+   * zero-gap scan) and, via gap_size/TRAMP_CODE_LEN, to size a write into
+   * `data` -- is actually <= data_len. A stock Evil for the selected model
+   * always satisfies this (its own segments describe its own real file
+   * size), so this cannot fire against any binary this tool is actually
+   * meant to patch; it closes the gap between that assumption and what the
+   * code enforces, for a corrupted download or a future/unexpected layout
+   * that still happens to pass the vtable-slot check above. */
+  if ((size_t)phdrs[next_idx].p_offset > data_len)
+  {
+    set_err(err, err_size,
+            "REFUSING: next PT_LOAD segment's file offset (0x%x) is past the end of the file (%zu bytes) -- "
+            "truncated/corrupt image or unexpected layout, re-verify before proceeding.",
+            (unsigned)phdrs[next_idx].p_offset, data_len);
+    free(phdrs);
+    return false;
+  }
 
   uint32_t gap_size = phdrs[next_idx].p_offset - code_file_end;
   if (gap_size < TRAMP_CODE_LEN)

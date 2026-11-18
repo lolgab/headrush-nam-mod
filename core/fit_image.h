@@ -69,7 +69,9 @@ bool nam_fit_read_root_metadata(const uint8_t* data, const FitProps* props, FitM
 /* Builds a fresh, valid FIT blob with the fixed splash/recoverysplash/rootfs
  * shape (each image's sha1 hash is computed here, matching what a real
  * `mkimage` would compute over the same bytes). *out_data is malloc'd --
- * caller frees it. Returns false only on allocation failure. */
+ * caller frees it. Returns false on allocation failure, or if
+ * metadata->device_count is outside 0..FIT_MAX_DEVICES (it indexes a
+ * fixed-size stack buffer internally). */
 bool nam_fit_build(const FitMetadata* metadata, const uint8_t* splash_xz, size_t splash_len,
                     const uint8_t* recoverysplash_xz, size_t recoverysplash_len, const uint8_t* rootfs_xz,
                     size_t rootfs_len, uint8_t** out_data, size_t* out_len);
