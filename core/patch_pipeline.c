@@ -249,20 +249,8 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     {
       if (!nam_qml_patch(evil_data, evil_len, target, err, err_size))
         goto cleanup;
-      /* FIX (found during review): docs/TECHNICAL.md's "What didn't make it
-       * in" section documents that this exact byte patch was flashed to real
-       * hardware (2026-08-13) and confirmed to have NO visible effect -- the
-       * on-screen captions stay stock Drive/Tone/Level regardless, root
-       * cause not found. The patch itself is harmless (bytes inside the
-       * embedded QML blob that real-hardware testing shows the compiled QML
-       * unit does not read), so it is left in place rather than removed, but
-       * the previous message here ("OK  QML knob labels relabeled") claimed
-       * a user-visible result that does not happen on a real device -- kept
-       * only for whoever investigates the root cause next; say so instead of
-       * promising something a Pedalboard owner won't see. */
-      report(progress, progress_user_data,
-             "..  QML knob-label bytes patched (confirmed on real hardware to have NO visible effect yet -- "
-             "see docs/TECHNICAL.md \"What didn't make it in\"; kept for future debugging, not a working feature)");
+      /* No visible effect on hardware: see docs/TECHNICAL.md "What didn't make it in". */
+      report(progress, progress_user_data, "OK  QML knob-label bytes patched (no on-screen effect)");
     }
     else
     {

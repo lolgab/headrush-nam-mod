@@ -388,10 +388,7 @@ bool nam_fit_build(const FitMetadata* metadata, const uint8_t* splash_xz, size_t
   *out_data = NULL;
   *out_len = 0;
 
-  /* devices_bytes below is a fixed FIT_MAX_DEVICES*4-byte stack buffer; metadata->device_count is trusted by every
-   * caller today only because nam_fit_read_root_metadata() clamps it via nam_fit_get_cells(), but nothing in this
-   * function itself enforces that -- a FitMetadata built by hand (or a future caller) with device_count out of
-   * range would write past the end of devices_bytes. Refuse instead of trusting the field silently. */
+  /* devices_bytes below is a fixed FIT_MAX_DEVICES*4-byte stack buffer. */
   if (metadata->device_count < 0 || metadata->device_count > FIT_MAX_DEVICES)
     return false;
 

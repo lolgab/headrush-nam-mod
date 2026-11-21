@@ -312,11 +312,7 @@ static void process_events(const Config* cfg, const unsigned char* buf, size_t l
     size_t step = sizeof(*ev);
     if ((ev->flags & SNDRV_SEQ_EVENT_LENGTH_MASK) == SNDRV_SEQ_EVENT_LENGTH_VARIABLE)
     {
-      /* ext.len is a kernel-reported unsigned int; a bogus/corrupt value near UINT_MAX would wrap `step` (size_t,
-       * 32-bit on this target) back down to a small number below, making the "does it fit" check downstream pass
-       * when it shouldn't and desyncing the parse from the real event boundaries. The while condition above
-       * already guarantees len - off >= step here, so this subtraction can't underflow; bail out before the
-       * addition instead of after it. */
+      /* Check before adding: on 32-bit, a huge ext.len would wrap step. */
       if (ev->data.ext.len > len - off - step)
         break;
       step += ev->data.ext.len; /* SysEx etc. -- payload follows, skip it */

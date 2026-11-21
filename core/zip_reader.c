@@ -119,11 +119,7 @@ bool nam_zip_extract_by_suffix(const uint8_t* zip_data, size_t zip_len, const ch
   return true;
 }
 
-/* Rejects a zip entry name that could write outside dest_dir ("Zip Slip"): an absolute path, a ".." path segment,
- * or a backslash (zip entry names are '/'-separated; a backslash here is either a foreign archiver's
- * drive-relative path or an attempt to defeat a '/'-only check). zip_data is a network download (the stock
- * HeadRush updater zip, per this file's header comment) -- "stock" describes its origin, not a reason to trust
- * its internal file names uninspected. */
+/* Rejects a path that could escape dest_dir ("Zip Slip"): absolute, empty/"."/".." segments, or a backslash. */
 static bool zip_name_is_safe(const char* name)
 {
   if (name[0] == '\0' || name[0] == '/' || name[0] == '\\')
@@ -224,11 +220,7 @@ bool nam_zip_extract_all(const uint8_t* zip_data, size_t zip_len, const char* de
       target_str[n] = '\0';
       mz_free(link_target);
 
-      /* zip_name_is_safe() above only keeps the symlink's own entry NAME inside dest_dir; its TARGET is a
-       * separate, independently-attacker-controlled string that is about to become a real symlink on disk, and
-       * later code (nam_mac_find_update_img + fopen(..., "wb")) can be led to follow it. An absolute target, or
-       * one with enough "../", points this symlink straight out of dest_dir at any path the extracting user can
-       * write -- the same Zip Slip class as the entry-name check above, just one level removed. */
+      /* The target can escape dest_dir too, and later writes may follow the link. */
       if (!zip_name_is_safe(target_str))
       {
         set_err(err, err_size, "symlink \"%s\" -> \"%s\" targets an absolute or \"..\"-escaping path; refusing",
