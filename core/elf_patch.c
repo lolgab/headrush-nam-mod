@@ -188,6 +188,16 @@ bool nam_elf_patch_gonkulator(uint8_t* data, size_t data_len, const uint8_t tram
     free(phdrs);
     return false;
   }
+  /* p_offset bounds the zero-gap scan and the trampoline write below. */
+  if ((size_t)phdrs[next_idx].p_offset > data_len)
+  {
+    set_err(err, err_size,
+            "REFUSING: next PT_LOAD segment's file offset (0x%x) is past the end of the file (%zu bytes) -- "
+            "truncated/corrupt image or unexpected layout, re-verify before proceeding.",
+            (unsigned)phdrs[next_idx].p_offset, data_len);
+    free(phdrs);
+    return false;
+  }
 
   uint32_t gap_size = phdrs[next_idx].p_offset - code_file_end;
   if (gap_size < TRAMP_CODE_LEN)

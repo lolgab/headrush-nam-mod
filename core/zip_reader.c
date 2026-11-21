@@ -119,6 +119,26 @@ bool nam_zip_extract_by_suffix(const uint8_t* zip_data, size_t zip_len, const ch
   return true;
 }
 
+/* Rejects a path that could escape dest_dir ("Zip Slip"): absolute, empty/"."/".." segments, or a backslash. */
+static bool zip_name_is_safe(const char* name)
+{
+  if (name[0] == '\0' || name[0] == '/' || name[0] == '\\')
+    return false;
+  for (const char* p = name; *p;)
+  {
+    if (*p == '\\')
+      return false;
+    const char* seg_end = p;
+    while (*seg_end && *seg_end != '/')
+      ++seg_end;
+    size_t seg_len = (size_t)(seg_end - p);
+    if (seg_len == 0 || (seg_len == 1 && p[0] == '.') || (seg_len == 2 && p[0] == '.' && p[1] == '.'))
+      return false;
+    p = *seg_end ? seg_end + 1 : seg_end;
+  }
+  return true;
+}
+
 #define S_IFLNK_MASK 0170000u
 #define S_IFLNK_VAL 0120000u
 
@@ -146,6 +166,14 @@ bool nam_zip_extract_all(const uint8_t* zip_data, size_t zip_len, const char* de
     mz_zip_archive_file_stat stat;
     if (!mz_zip_reader_file_stat(&zip, (mz_uint)i, &stat))
       continue;
+
+    if (!zip_name_is_safe(stat.m_filename))
+    {
+      set_err(err, err_size, "zip entry \"%s\" has an absolute or \"..\"-escaping path; refusing to extract it",
+              stat.m_filename);
+      ok = false;
+      break;
+    }
 
     char full_path[1200];
     snprintf(full_path, sizeof(full_path), "%s/%s", dest_dir, stat.m_filename);
@@ -191,6 +219,15 @@ bool nam_zip_extract_all(const uint8_t* zip_data, size_t zip_len, const char* de
       memcpy(target_str, link_target, n);
       target_str[n] = '\0';
       mz_free(link_target);
+
+      /* The target can escape dest_dir too, and later writes may follow the link. */
+      if (!zip_name_is_safe(target_str))
+      {
+        set_err(err, err_size, "symlink \"%s\" -> \"%s\" targets an absolute or \"..\"-escaping path; refusing",
+                stat.m_filename, target_str);
+        ok = false;
+        break;
+      }
 
       unlink(full_path); /* fine if it doesn't exist */
 #ifdef _WIN32

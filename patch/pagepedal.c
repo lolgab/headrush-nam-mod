@@ -311,7 +311,12 @@ static void process_events(const Config* cfg, const unsigned char* buf, size_t l
     const struct snd_seq_event* ev = (const struct snd_seq_event*)(buf + off);
     size_t step = sizeof(*ev);
     if ((ev->flags & SNDRV_SEQ_EVENT_LENGTH_MASK) == SNDRV_SEQ_EVENT_LENGTH_VARIABLE)
+    {
+      /* Check before adding: on 32-bit, a huge ext.len would wrap step. */
+      if (ev->data.ext.len > len - off - step)
+        break;
       step += ev->data.ext.len; /* SysEx etc. -- payload follows, skip it */
+    }
 
     switch (ev->type)
     {

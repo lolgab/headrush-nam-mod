@@ -388,6 +388,10 @@ bool nam_fit_build(const FitMetadata* metadata, const uint8_t* splash_xz, size_t
   *out_data = NULL;
   *out_len = 0;
 
+  /* devices_bytes below is a fixed FIT_MAX_DEVICES*4-byte stack buffer. */
+  if (metadata->device_count < 0 || metadata->device_count > FIT_MAX_DEVICES)
+    return false;
+
   GrowBuf strtab = {0};
   uint32_t strtab_offsets[STRTAB_COUNT];
   if (!build_strtab(&strtab, strtab_offsets))
