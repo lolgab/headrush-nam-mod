@@ -78,9 +78,9 @@ With Hi-Lo on, the input is scaled by `interface_dBu - model_input_level_dBu` (t
 `.nam` metadata; `NAM_CAL_LOUDNESS_DB` overrides the target, same ±24 dB cap, models without it untouched), with Level
 trim on top. The NAM pedals have the same
 calibration: their equivalent of the Hi-Lo switch is the stock **Gain Low/High** switch, **High = on**, off by default.
-**Verified on hardware:** on the NAM pedals the switch is the low byte of the word at engine offset `0x57c` (the word
-reads `0x00010000` off and `0x00010001` on, other flags share it, so the byte is tested, not the whole word). **Unverified
-on hardware:** the Anxiety OD offset (`0x55c`; `NAM_HILO_OFFSET` overrides either) and the 12.2 dBu reference.
+**Verified on hardware:** on the NAM pedals the switch is an engine flag (other flags share its word, so only the
+switch's own byte is tested). **Unverified on hardware:** the Anxiety OD flag's location (`NAM_HILO_OFFSET` overrides
+either) and the 12.2 dBu reference.
 
 The Model knob has a fixed 101 positions (0%-100%, one per whole percent).
 Each position selects one `.nam` file, in alphabetical order, starting at 0%:
@@ -205,10 +205,6 @@ real-time audio thread.
   **disabled** — real-hardware testing showed renaming that string breaks
   the pedal entirely (it's very likely used as an internal type-name lookup
   key, not just a label).
-
-See [`ADDITIVE_PEDAL.md`](ADDITIVE_PEDAL.md) for a second, non-hijacking
-pedal design that was researched but never shipped (unreachable from the
-firmware's own UI).
 
 ## Repo layout
 

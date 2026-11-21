@@ -100,8 +100,7 @@ All default to 50 %.
   second registry pair; the name-based dispatch has only been exercised by the
   fake-table test.
 * The picker's Reverb list is built by the same static initializer as the
-  Distortion one; the same hook is attached to its `bl 0x59c0f0` (0x669b8,
-  veneer in dead case 82 at 0x209e70). The name to pedal-id lookup is by name,
+  Distortion one, and the same hook is attached to it. The name to pedal-id lookup is by name,
   so the category should not matter, but this is untested on hardware.
   The stock captions are a limit of the firmware UI, as for NAM. A pedal image falls back to `img/Other.png`.
 * The wet level (0.6 on the tap sum) and the knob curves are by ear-free
