@@ -34,7 +34,5 @@ extern const unsigned char g_ui_pedal_art_qml[]; /* the pedal drawn on the detai
 extern const unsigned long g_ui_pedal_art_qml_len;
 extern const unsigned char g_ui_rig_block_qml[]; /* the overlay on the Rig page's stomp blocks */
 extern const unsigned long g_ui_rig_block_qml_len;
-extern const unsigned char g_ui_tile_qml[]; /* EncoderParamInfo.qml with the real parameter names */
-extern const unsigned long g_ui_tile_qml_len;
 
 #endif

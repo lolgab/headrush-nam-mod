@@ -13,6 +13,7 @@
  * NAM (--instances 4 also hijacks Anxiety OD V2); --no-nam-pedals leaves out the new pedals (hijack only). MX5 and
  * Gigboard have no NAM pedals yet and always get the Anxiety OD hijack.
  */
+#include "model_targets.h"
 #include "patch_pipeline.h"
 #include "tempdir.h"
 
@@ -154,6 +155,16 @@ int main(int argc, char** argv)
 
   size_t input_len;
   uint8_t* input_data = read_whole_file(input_img, &input_len);
+
+  /* the GUI refuses anything but the tested stock image; the CLI also takes dev bases (USB console builds), so it
+   * only says which one it got */
+  const ModelTarget* target = nam_select_target(model_name, NULL, NULL);
+  char hex[65] = "?";
+  if (target && nam_is_known_stock_img(target, input_data, input_len, hex))
+    printf("OK  input is the tested stock %s 2.7 image (sha256 %.12s...)\n", model_name, hex);
+  else
+    printf("note: input is not the tested stock %s 2.7 image (sha256 %.12s...); the GUI would refuse it\n", model_name,
+           hex);
 
   uint8_t* out_data;
   size_t out_len;

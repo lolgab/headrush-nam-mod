@@ -1,13 +1,13 @@
 # Third-party licenses
 
-This project's own code (patch scripts, glue code, `headrush-nam-gui`) is
+This project's own code (patch scripts, glue code, `nam-mod-gui`) is
 licensed under the [GNU GPLv3](LICENSE). It statically links, vendors, or
 (on Windows) redistributes the components listed below. Each is under
 its own license, reproduced in full here. This file is bundled in every
 release artifact (Linux/macOS tarball, Windows zip).
 
 Sections marked **(Windows only)** cover DLLs shipped solely in
-`headrush-nam-gui-windows.zip`, because those runtime libraries aren't
+`nam-mod-gui-windows.zip`, because those runtime libraries aren't
 present on a stock Windows install. The macOS binary statically links
 SDL2 and liblzma (and uses the OS's own libcurl). On Linux the equivalent
 libraries are dynamically linked against packages the user installs
@@ -19,7 +19,7 @@ themselves (`apt`) and are not redistributed by this project.
 
 [NeuralAmpModelerCore](https://github.com/sdatkinson/NeuralAmpModelerCore),
 Copyright (c) 2023 Steven Atkinson. Statically linked into
-`headrush-nam-gui` and `blobs/libnam_hook.so`. Fetched at build time by
+`nam-mod-gui` and `blobs/libnam_hook.so`. Fetched at build time by
 `scripts/fetch_nam_core.sh`, not committed to this repo.
 
 MIT License

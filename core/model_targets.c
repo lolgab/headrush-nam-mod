@@ -1,5 +1,7 @@
 #include "model_targets.h"
 
+#include "stock_cache.h"
+
 #include <stdio.h>
 #include <string.h>
 
@@ -19,6 +21,7 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
         {0x1b7bf1b, "Tone", "Inp "},
         {0x1b7be57, "Level", "Outp "},
       },
+    .stock_img_sha256 = "0a7a85c96d11205e67ea8732bca6b53301ce8154e2fa24e01c9ff669b23097bf",
   },
   /* HeadRush MX5 2.7 (final release). No per-pedal QML relabel target --
    * knob names come from a shared string pool. */
@@ -30,6 +33,7 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
     .v2_engine_vtable_vaddr = 0x17ee4dc,
     .v2_orig_process_fn = 0x302ed0,
     .qml_rename_count = 0,
+    .stock_img_sha256 = "c09326c7a9caf561049a214c522c9e6ed72bc3660a3930ba0023943cc376628c",
   },
   /* HeadRush Gigboard 2.7 -- confirmed working on real hardware.
    * See model_targets.py. */
@@ -41,6 +45,7 @@ const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT] = {
     .v2_engine_vtable_vaddr = 0x17f22b0,
     .v2_orig_process_fn = 0x302840,
     .qml_rename_count = 0,
+    .stock_img_sha256 = "f34eb19b3bfd3df827400458f18d28a4b9d4d9ab8bb5527506bb5b7ce1e70559",
   },
 };
 
@@ -100,4 +105,13 @@ const ModelTarget* nam_select_target(const char* model_name, const char* compati
     *reason_out = reason_buf;
   }
   return NULL;
+}
+
+bool nam_is_known_stock_img(const ModelTarget* target, const uint8_t* data, size_t len, char out_hex[65])
+{
+  char hex[65];
+  nam_sha256_hex(data, len, hex);
+  if (out_hex)
+    memcpy(out_hex, hex, sizeof(hex));
+  return target->stock_img_sha256 && strcmp(hex, target->stock_img_sha256) == 0;
 }

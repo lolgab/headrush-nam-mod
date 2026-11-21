@@ -172,6 +172,7 @@ typedef struct
   int add_nam_pedals;    /* Pedalboard: add the "NAM" and "NAM TWO" pedals (default on) */
   int anxiety_hijack;    /* opt-in legacy mode: Anxiety OD runs NAM (always on for models without NAM pedals) */
   bool enable_v2_hijack; /* with the hijack: false = 2 instances (Anxiety OD only), true = up to 4 (also Anxiety OD V2) */
+  int accepted_risk;     /* "I own this device and accept the risk" -- Install stays disabled until ticked */
   char log_lines[MAX_LOG_LINES][256];
   int log_count;
   uint64_t dl_downloaded, dl_total;
@@ -296,8 +297,8 @@ static void nam_open_path(const char* path)
 #elif defined(_WIN32)
   /* Deliberately NOT system()/cmd.exe -- same bug class fixed for 7z in
    * win_repack.c's run_7z(): cmd.exe's command-lookup heuristic mangles
-   * command lines once a path has both spaces and parens (every output
-   * path here does, e.g. "...Firmware Updater (NAM mod).exe"), so the
+   * command lines once a path has both spaces and parens (the stock copy's
+   * path does, e.g. "...Firmware Updater (stock).exe"), so the
    * old "start \"\" <path>" silently failed. ShellExecuteA takes the
    * path as its own parameter, never as part of a parsed command line,
    * so it isn't subject to that parser at all. */
@@ -556,6 +557,26 @@ static int worker_main(void* data)
   shared_push_log(shared, "OK  extracted Update.img from the stock updater");
 #endif
 
+  /* only the exact firmware this version was tested against: a different one (a HeadRush update, a damaged download)
+   * could have the patch points elsewhere, and a bad flash is the user's device */
+  {
+    char hex[65];
+    if (!nam_is_known_stock_img(target, stock_img, stock_img_len, hex))
+    {
+      free(stock_img);
+      nam_remove_dir_recursive(workdir);
+      nam_stock_cache_drop(cache_key);
+      snprintf(err, sizeof(err),
+               "the downloaded %s firmware (sha256 %.12s...) is not the 2.7 release this version was tested with; "
+               "nothing was patched. HeadRush may have published an update: check for a newer version of the mod.",
+               target->name, hex);
+      set_error(shared, err);
+      return 1;
+    }
+    snprintf(msg, sizeof(msg), "OK  stock firmware is the tested %s 2.7 release (sha256 %.12s...)", target->name, hex);
+    shared_push_log(shared, msg);
+  }
+
   uint8_t* out_data;
   size_t out_len;
   ok = nam_patch_pipeline(stock_img, stock_img_len, target->name, &opts, workdir, progress_to_log, shared, &out_data,
@@ -583,7 +604,7 @@ static int worker_main(void* data)
     if (n > 4 && strcmp(app_base_name + n - 4, ".app") == 0)
       app_base_name[n - 4] = '\0';
   }
-  snprintf(out_path, sizeof(out_path), "%s/%s (NAM mod).app", cwd, app_base_name);
+  snprintf(out_path, sizeof(out_path), "%s/NAM mod for %s.app", cwd, app_base_name);
   bool packaged = nam_mac_package_app(extract_dir, out_data, out_len, out_path, err, sizeof(err));
   free(out_data);
   if (!packaged)
@@ -614,7 +635,7 @@ static int worker_main(void* data)
       shared_push_log(shared, "note: couldn't save a copy of the unmodified stock updater (non-fatal)");
   }
 #elif defined(_WIN32)
-  snprintf(out_path, sizeof(out_path), "%s/HeadRush %s Firmware Updater (NAM mod).exe", cwd, target->name);
+  snprintf(out_path, sizeof(out_path), "%s/NAM mod for HeadRush %s Firmware Updater.exe", cwd, target->name);
   bool repacked =
     nam_win_repack_updater(stock_exe_path, out_data, out_len, out_path, sevenzip_path, workdir, err, sizeof(err));
   free(out_data);
@@ -871,7 +892,7 @@ int main(int argc, char** argv)
     return 1;
   }
 
-  SDL_Window* win = SDL_CreateWindow("HeadRush NAM Mod Installer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+  SDL_Window* win = SDL_CreateWindow("NAM Mod Installer for HeadRush", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                       640, 480, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
   SDL_Renderer* renderer = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 
@@ -913,16 +934,14 @@ int main(int argc, char** argv)
     AppState state = shared.state;
     SDL_UnlockMutex(shared.mutex);
 
-    if (nk_begin(ctx, "HeadRush NAM Mod Installer", nk_rect(0, 0, 640, 480), NK_WINDOW_NO_SCROLLBAR))
+    if (nk_begin(ctx, "NAM Mod Installer for HeadRush", nk_rect(0, 0, 640, 480), NK_WINDOW_NO_SCROLLBAR))
     {
       if (state == APP_STATE_PICK)
       {
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Pick your device, then click Install.", NK_TEXT_LEFT);
+        nk_label(ctx, "Unofficial: not affiliated with or endorsed by inMusic/HeadRush.", NK_TEXT_LEFT);
         nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "Downloads the official stock firmware and applies the NAM mod --", NK_TEXT_LEFT);
-        nk_layout_row_dynamic(ctx, 24, 1);
-        nk_label(ctx, "no terminal, no extra tools needed.", NK_TEXT_LEFT);
+        nk_label(ctx, "Downloads the official updater and patches your copy of it.", NK_TEXT_LEFT);
 
         nk_layout_row_dynamic(ctx, 30, 1);
         for (int i = 0; i < NAM_MODEL_COUNT; ++i)
@@ -970,6 +989,10 @@ int main(int argc, char** argv)
           nk_label(ctx, "Footswitch page-turner: Pedalboard only", NK_TEXT_LEFT);
         }
 
+        nk_layout_row_dynamic(ctx, 28, 1);
+        nk_checkbox_label(ctx, "I own this device and accept the risk (may brick it, voids warranty)",
+                          &shared.accepted_risk);
+
         const bool nothing_selected = pedalboard && !shared.add_nam_pedals && !shared.anxiety_hijack;
         if (nothing_selected)
         {
@@ -978,7 +1001,7 @@ int main(int argc, char** argv)
         }
 
         nk_layout_row_dynamic(ctx, 40, 1);
-        if (nk_button_label(ctx, "Install NAM Mod") && !nothing_selected)
+        if (nk_button_label(ctx, "Install NAM Mod") && !nothing_selected && shared.accepted_risk)
         {
           SDL_LockMutex(shared.mutex);
           shared.state = APP_STATE_RUNNING;

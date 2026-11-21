@@ -4,7 +4,7 @@ Optional, **Pedalboard only**. Turns two footswitches into a USB keyboard for
 the computer the Pedalboard is plugged into: **Page Down** and **Page Up**, so
 you can turn pages in a PDF (sheet music, lyrics) with your foot.
 
-Enable it with the **Footswitch page-turner** checkbox in `headrush-nam-gui`,
+Enable it with the **Footswitch page-turner** checkbox in `nam-mod-gui`,
 or `--page-pedal` on `gui-core-cli`. It is independent of the NAM options and
 is installed on top of them.
 

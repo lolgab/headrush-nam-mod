@@ -2,7 +2,7 @@
  * source file defining it as a byte array + length. Used to compile the
  * blobs/ files (a fixed function of the patch/ sources, cross-compiled
  * by build_blobs.sh) directly into the GUI binary instead of shipping them
- * as loose sibling files -- makes headrush-nam-gui/gui-core-cli fully
+ * as loose sibling files -- makes nam-mod-gui/gui-core-cli fully
  * self-contained single-file executables. Deliberately plain C with no
  * platform-specific code (runs as a host tool on every build machine,
  * including under a mingw-w64 cross toolchain).

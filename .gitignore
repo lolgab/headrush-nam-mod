@@ -13,3 +13,9 @@ __pycache__/
 
 # dev tooling virtualenv (tools/hrdev.py)
 tools/.venv/
+
+# updaters the GUI writes to the current directory -- they contain HeadRush firmware, never commit them
+*.app/
+*.exe
+
+/notes/

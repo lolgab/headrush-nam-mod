@@ -17,7 +17,8 @@ static void set_err(char* err, size_t err_size, const char* fmt, ...)
   va_end(ap);
 }
 
-static const char k_old[] = "source: blckEdt.visible ? curModuleUIFile.translator.string + \".qml\" : \"\"";
+/* the editor Loader's `source: blckEdt.visible ? curModuleUIFile... : ""` gets a nested ternary for the additive pedals */
+static const char k_old[] = "visible ? curModuleUIFile";
 static const char k_key[] = "/Pages/BlockDetails.qml";
 
 static uint32_t rd_be32(const uint8_t* p)
@@ -213,20 +214,14 @@ bool nam_qml_override_blockdetails(uint8_t* data, size_t data_len, const char* p
     return false;
   }
   char repl[512];
-  snprintf(repl, sizeof(repl),
-           "source: blckEdt.visible ? (curModuleUIFile.translator.string.indexOf(\"MorningGlory\") >= 0 ? \"%s\" : "
-           "curModuleUIFile.translator.string + \".qml\") : \"\"",
+  snprintf(repl, sizeof(repl), "visible ? curModuleUIFile.translator.string.indexOf(\"MorningGlory\") >= 0 ? \"%s\" : curModuleUIFile",
            page_url);
   if (!patch_zlib_entry(data, data_len, k_old, repl, k_key, "BlockDetails.qml", err, err_size))
     return false;
   /* the picture on the left: for pedals without a picture of their own (the stock page falls back to Other.png and they
    * all end up here), a Loader of the drawn pedal; the art shows the stock fallback itself for everything else */
-  static const char k_img[] =
-      "Image {source: \"ModuleEditors/img/Other.png\"; visible: preview.status === Image.Error && !parent.isAmp() && "
-      "!parent.isCab()}";
-  static const char k_art[] =
-      "Loader {source: \"file:///usr/Evil/Resources/pedal_art.qml\"; visible: preview.status === Image.Error && "
-      "!parent.isAmp() && !parent.isCab()}";
+  static const char k_img[] = "Image {source: \"ModuleEditors/img/Other.png\"";
+  static const char k_art[] = "Loader {source: \"file:///usr/Evil/Resources/pedal_art.qml\"";
   return patch_zlib_entry(data, data_len, k_img, k_art, k_key, "BlockDetails.qml (picture)", err, err_size);
 }
 
@@ -236,13 +231,11 @@ bool nam_qml_override_stomp(uint8_t* data, size_t data_len, char* err, size_t er
   /* the Reverb's stock stomp picture is recoloured blue */
   static const char hue_old[] = "hue: hslColor[0] ";
   static const char hue_new[] = "hue: signalChainModule.moduleName.indexOf(\"Reverb\") == 0 ? 0.58 : hslColor[0] ";
-  /* the overlay (knobs, model / algorithm caption) goes right after the stock LED picture */
-  static const char led_old[] =
-      "source: signalChainModule.active ? \"../../img/FXModule_Active_5_StompSwitchLED.png\" : "
-      "\"../../img/FXModule_Bypassed_3_StompSwitchLED.png\"";
+  /* the overlay (knobs, model / algorithm caption) goes right after the stock LED picture, whose `source:` ends with
+   * the bypassed LED's file name */
+  static const char led_old[] = "Bypassed_3_StompSwitchLED.png\"";
   static const char led_new[] =
-      "source: signalChainModule.active ? \"../../img/FXModule_Active_5_StompSwitchLED.png\" : "
-      "\"../../img/FXModule_Bypassed_3_StompSwitchLED.png\"\n\t\t}\n\t\tLoader {\n\t\t\tanchors.fill: parent\n\t\t\tsource: "
+      "Bypassed_3_StompSwitchLED.png\"\n\t\t}\n\t\tLoader {\n\t\t\tanchors.fill: parent\n\t\t\tsource: "
       "signalChainModule.moduleName.indexOf(\"NAM\") == 0 || signalChainModule.moduleName.indexOf(\"Reverb\") == 0 ? "
       "\"file:///usr/Evil/Resources/rig_block.qml\" : \"\"\n\t\t\tonLoaded: item.m = signalChainModule";
   return patch_zlib_entry(data, data_len, hue_old, hue_new, key, "ActiveStomp.qml (hue)", err, err_size)
@@ -251,18 +244,112 @@ bool nam_qml_override_stomp(uint8_t* data, size_t data_len, char* err, size_t er
 
 bool nam_qml_override_encoder_field(uint8_t* data, size_t data_len, char* err, size_t err_size)
 {
-  static const char old[] =
-      "property int numParams: Evil.getProperty(\"/Engine/RedirCtrl/NumEditParams\").translator.unnormalized";
+  /* numParams is the engine's NumEditParams; the tiles the pages replace are subtracted in front of it */
+  static const char old[] = "int numParams: ";
   static const char repl[] =
-      "property int numParams: Evil.getProperty(\"/Engine/RedirCtrl/NumEditParams\").translator.unnormalized - "
-      "(function(){var t=Evil.getProperty(\"/Engine/Patch/Chain/ModuleType\" + "
+      "int numParams: -(function(){var t=Evil.getProperty(\"/Engine/Patch/Chain/ModuleType\" + "
       "Evil.getProperty(\"/Engine/RedirCtrl/CurModule\").translator.index);var s=t && t.translator ? "
-      "t.translator.string : \"\";return s.indexOf(\"NAM\") == 0 ? 1 : (s.indexOf(\"Reverb\") == 0 ? 2 : 0)})()";
+      "t.translator.string : \"\";return s.indexOf(\"NAM\") == 0 ? 1 : (s.indexOf(\"Reverb\") == 0 ? 2 : 0)})() + ";
   return patch_zlib_entry(data, data_len, old, repl, "/Pages/EncoderField.qml", "EncoderField.qml", err, err_size);
 }
 
-bool nam_qml_override_encoder_tile(uint8_t* data, size_t data_len, const char* qml, size_t qml_len, char* err,
-                                   size_t err_size)
+/* Replaces every occurrence of `old` in the NUL-terminated `*text` by `repl`; refuses unless there are exactly `want`. */
+static bool replace_all(char** text, const char* old, const char* repl, size_t want, char* err, size_t err_size)
+{
+  const size_t ol = strlen(old), rl = strlen(repl), tl = strlen(*text);
+  size_t hits = 0;
+  for (const char* p = strstr(*text, old); p; p = strstr(p + ol, old))
+    ++hits;
+  if (hits != want)
+  {
+    set_err(err, err_size, "EncoderParamInfo.qml: \"%.40s\" found %zu times (expected %zu); not the stock Pedalboard 2.7 Evil",
+            old, hits, want);
+    return false;
+  }
+  char* out = malloc(tl + hits * rl + 1);
+  if (!out)
+  {
+    set_err(err, err_size, "out of memory");
+    return false;
+  }
+  size_t o = 0;
+  const char* q = *text;
+  for (const char* p = strstr(q, old); p; p = strstr(q, old))
+  {
+    memcpy(out + o, q, (size_t)(p - q));
+    o += (size_t)(p - q);
+    memcpy(out + o, repl, rl);
+    o += rl;
+    q = p + ol;
+  }
+  strcpy(out + o, q);
+  free(*text);
+  *text = out;
+  return true;
+}
+
+/* Drops the blanks a QML/JS source does not need, in place: indentation, trailing blanks, blank lines, full-line //
+ * comments, and blanks next to punctuation. String literals are kept as they are. */
+static size_t squeeze(char* t)
+{
+  static const char punct[] = ";:{}(),?=<>&|![]\n";
+  size_t o = 0;
+  bool quoted = false;
+  bool line_start = true;
+  for (size_t i = 0; t[i];)
+  {
+    if (line_start)
+    {
+      while (t[i] == ' ' || t[i] == '\t' || t[i] == '\n')
+        ++i;
+      if (t[i] == '/' && t[i + 1] == '/')
+      {
+        while (t[i] && t[i] != '\n')
+          ++i;
+        continue;
+      }
+      line_start = false;
+      continue;
+    }
+    const char c = t[i];
+    if (!quoted && (c == ' ' || c == '\t'))
+    {
+      size_t j = i;
+      while (t[j] == ' ' || t[j] == '\t')
+        ++j;
+      const char next = t[j] ? t[j] : '\n';
+      if (!strchr(punct, t[o - 1]) && !strchr(punct, next))
+        t[o++] = ' ';
+      i = j;
+      continue;
+    }
+    if (c == '"')
+      quoted = !quoted;
+    t[o++] = c;
+    ++i;
+    if (c == '\n')
+      line_start = true;
+  }
+  t[o] = '\0';
+  return o;
+}
+
+/* Our own additions to the tiles: the pedal type of the current module, and the real parameter names of the additive
+ * pedals in place of the Glorious Drive clone's DRIVE / LEVEL / TONE. Shorthands p() and o keep the result in the slot. */
+static const char k_tile_helpers[] =
+    "property bool fullColor: false\n"
+    "function g(s){return Evil.getP(\"/Engine/\"+s)}\n"
+    "function p(s){return g(\"RedirCtrl/\"+s+(index+1))}\n"
+    "property real o: showPedalLock ? 0.5 : 1.0\n"
+    "property var tp:g(\"Patch/Chain/ModuleType\"+g(\"RedirCtrl/CurModule\").translator.index)\n"
+    "property string mt:tp&&tp.translator?tp.translator.string:\"\"\n"
+    "function rn(n){var a=mt.indexOf(\"NAM\")==0,r=mt.indexOf(\"Reverb\")==0,"
+    "i=[\"DRIVE\",\"LEVEL\",\"TONE\",\"GAIN\",\"LOW\",\"HIGH\"].indexOf(n.toUpperCase());"
+    "return i<0||!(a||r)?n:(a?[\"MODEL\",\"INPUT\",\"OUTPUT\",\"CALIB\",\"OFF\",\"ON\"]:[\"DECAY\",\"MIX\",\"DAMPING\",n,n,n])[i]}\n"
+    "function tx(q,k){return rn(q&&q.translator?q.translator[k]:\"\")}\n"
+    "Loader{source:mt.indexOf(\"NAM\")==0?\"file:///usr/Evil/Resources/nam_fix.qml\":\"\";onLoaded:item.t=frame}";
+
+bool nam_qml_override_encoder_tile(uint8_t* data, size_t data_len, char* err, size_t err_size)
 {
   /* plain entry: [be32 L][source, L bytes]; identified by its start and two lines only this file has */
   static const char k_head[] = "import QtQuick 2.2\nimport QtQuick.Controls 1.2\nimport StateMap 1.0\n";
@@ -292,12 +379,55 @@ bool nam_qml_override_encoder_tile(uint8_t* data, size_t data_len, const char* q
     set_err(err, err_size, "EncoderParamInfo.qml found %zu times (expected once); not the stock Pedalboard 2.7 Evil", hits);
     return false;
   }
+
+  /* the stock source, edited: {old, new, expected count}, applied in order */
+  static const struct
+  {
+    const char *old, *repl;
+    size_t count;
+  } k_edits[] = {
+    /* imports the tiles do not use */
+    {"import QtQuick.Controls 1.2\n", "", 1},
+    {"import \"../Controls\"\n", "", 1},
+    {"import \"../Controls/Knobs\"\n", "", 1},
+    {"import \"../Controls/Menues\"\n", "", 1},
+    {"import \"../Controls/Buttons\"\n", "", 1},
+    {"import \"../GraphicFX\"\n", "", 1},
+    /* shorthands, defined in k_tile_helpers */
+    {"Evil.getProperty(\"/Engine/RedirCtrl/", "p(\"", 7},
+    {"%1\".arg(frame.index+1))", "\")", 7},
+    {"frame.showPedalLock ? 0.5 : 1.0", "o", 4},
+    {"frame.", "", 11},
+    /* the captions and the value go through rn() */
+    {"prop: p(\"ParamNameHi\");", "prop: p(\"ParamNameHi\"); text: tx(prop,\"string\");", 1},
+    {"prop: p(\"ParamNameLo\");", "prop: p(\"ParamNameLo\"); text: tx(prop,\"string\");", 1},
+    {"textSize: 85; prop: p(\"ParamRedirected\");", "textSize: 85; prop: p(\"ParamRedirected\"); text: tx(prop,\"stringNoUnits\");", 1},
+    {"allowLowercase: true }", "allowLowercase: true; text: tx(prop,\"stringUnits\") }", 1},
+    {"property bool fullColor: false", k_tile_helpers, 1},
+  };
+  char* text = malloc((size_t)L + 1);
+  if (!text)
+  {
+    set_err(err, err_size, "out of memory");
+    return false;
+  }
+  memcpy(text, data + entry + 4, L);
+  text[L] = '\0';
+  for (size_t i = 0; i < sizeof(k_edits) / sizeof(k_edits[0]); ++i)
+    if (!replace_all(&text, k_edits[i].old, k_edits[i].repl, k_edits[i].count, err, err_size))
+    {
+      free(text);
+      return false;
+    }
+  const size_t qml_len = squeeze(text);
   if (qml_len > L)
   {
     set_err(err, err_size, "edited EncoderParamInfo.qml does not fit its slot (%zu > %u bytes)", qml_len, (unsigned)L);
+    free(text);
     return false;
   }
   memset(data + entry + 4, ' ', L);
-  memcpy(data + entry + 4, qml, qml_len);
+  memcpy(data + entry + 4, text, qml_len);
+  free(text);
   return break_key(data, data_len, "/Groups/EncoderParamInfo.qml", err, err_size);
 }

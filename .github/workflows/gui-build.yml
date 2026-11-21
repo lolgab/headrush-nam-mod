@@ -18,7 +18,7 @@ name: gui build
 # liblzma, SDL2, libwinpthread) that a stock Windows box does not have --
 # they don't ship with Windows and MSYS2 isn't installed on end-user
 # machines. The exe alone 0xc000007b's / "missing DLL" pop-ups on launch
-# (see https://github.com/lolgab/headrush-nam-mod/issues/7); the build
+# (see https://github.com/lolgab/mods-for-legacy-headrush/issues/7); the build
 # must ship those DLLs alongside it, not just the .exe.
 on:
   push:
@@ -102,23 +102,23 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target headrush-nam-gui --parallel
+          cmake --build build --target nam-mod-gui --parallel
 
-      - run: mv build/headrush-nam-gui build/headrush-nam-gui-linux
+      - run: mv build/nam-mod-gui build/nam-mod-gui-linux
 
       # GitHub Releases strips unix permission bits from raw file assets --
       # a bare binary downloads with no exec bit set. tar preserves the
       # mode itself, so extracting the archive restores +x.
       - name: Package (tar.gz, preserves exec bit)
         run: |
-          chmod +x build/headrush-nam-gui-linux
+          chmod +x build/nam-mod-gui-linux
           cp THIRD_PARTY_LICENSES.md build/
-          tar -czf build/headrush-nam-gui-linux.tar.gz -C build headrush-nam-gui-linux THIRD_PARTY_LICENSES.md
+          tar -czf build/nam-mod-gui-linux.tar.gz -C build nam-mod-gui-linux THIRD_PARTY_LICENSES.md
 
       - uses: actions/upload-artifact@v4
         with:
-          name: headrush-nam-gui-linux
-          path: build/headrush-nam-gui-linux.tar.gz
+          name: nam-mod-gui-linux
+          path: build/nam-mod-gui-linux.tar.gz
 
   # macos-latest is an Apple Silicon (arm64) runner; the release binary is
   # universal (arm64 + x86_64 for Intel Macs), built once per arch and
@@ -156,21 +156,21 @@ jobs:
       - name: Build (arm64)
         run: |
           cmake -C deps-arm64/deps.cmake -S . -B build-arm64 -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-arm64 --target headrush-nam-gui --parallel
+          cmake --build build-arm64 --target nam-mod-gui --parallel
 
       - name: Build (x86_64)
         run: |
           cmake -C deps-x86_64/deps.cmake -S . -B build-x86_64 -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-x86_64 --target headrush-nam-gui --parallel
+          cmake --build build-x86_64 --target nam-mod-gui --parallel
 
       - name: Create universal binary
         run: |
-          lipo -create -output build-arm64/headrush-nam-gui-macos \
-            build-arm64/headrush-nam-gui build-x86_64/headrush-nam-gui
-          lipo -info build-arm64/headrush-nam-gui-macos
+          lipo -create -output build-arm64/nam-mod-gui-macos \
+            build-arm64/nam-mod-gui build-x86_64/nam-mod-gui
+          lipo -info build-arm64/nam-mod-gui-macos
           # Must be self-contained: only /usr/lib and /System dylibs.
           for arch in arm64 x86_64; do
-            if otool -arch "$arch" -L build-arm64/headrush-nam-gui-macos | tail -n +2 | grep -vE '^[[:space:]]*(/usr/lib/|/System/)'; then
+            if otool -arch "$arch" -L build-arm64/nam-mod-gui-macos | tail -n +2 | grep -vE '^[[:space:]]*(/usr/lib/|/System/)'; then
               echo "$arch slice links non-system dylibs (above)" >&2
               exit 1
             fi
@@ -180,14 +180,14 @@ jobs:
       # assets, tar preserves it.
       - name: Package (tar.gz, preserves exec bit)
         run: |
-          chmod +x build-arm64/headrush-nam-gui-macos
+          chmod +x build-arm64/nam-mod-gui-macos
           cp THIRD_PARTY_LICENSES.md build-arm64/
-          tar -czf build-arm64/headrush-nam-gui-macos.tar.gz -C build-arm64 headrush-nam-gui-macos THIRD_PARTY_LICENSES.md
+          tar -czf build-arm64/nam-mod-gui-macos.tar.gz -C build-arm64 nam-mod-gui-macos THIRD_PARTY_LICENSES.md
 
       - uses: actions/upload-artifact@v4
         with:
-          name: headrush-nam-gui-macos
-          path: build-arm64/headrush-nam-gui-macos.tar.gz
+          name: nam-mod-gui-macos
+          path: build-arm64/nam-mod-gui-macos.tar.gz
 
   build-windows:
     needs: build-blobs
@@ -231,7 +231,7 @@ jobs:
       - name: Build
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --target headrush-nam-gui --parallel
+          cmake --build build --target nam-mod-gui --parallel
 
       # The exe alone doesn't run on a stock Windows box: it dynamically
       # links libcurl/liblzma/SDL2/libwinpthread from MSYS2's MINGW64
@@ -246,8 +246,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/dist
-          cp build/headrush-nam-gui.exe build/dist/headrush-nam-gui-windows.exe
-          ldd build/headrush-nam-gui.exe \
+          cp build/nam-mod-gui.exe build/dist/nam-mod-gui-windows.exe
+          ldd build/nam-mod-gui.exe \
             | grep -i '/mingw64/' \
             | awk '{print $3}' \
             | sort -u \
@@ -311,12 +311,12 @@ jobs:
       - name: Zip Windows dist
         run: |
           cd build/dist
-          7z a ../headrush-nam-gui-windows.zip .
+          7z a ../nam-mod-gui-windows.zip .
 
       - uses: actions/upload-artifact@v4
         with:
-          name: headrush-nam-gui-windows
-          path: build/headrush-nam-gui-windows.zip
+          name: nam-mod-gui-windows
+          path: build/nam-mod-gui-windows.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -327,7 +327,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: headrush-nam-gui-*
+          pattern: nam-mod-gui-*
           path: artifacts
           merge-multiple: true
 

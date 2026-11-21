@@ -1,8 +1,19 @@
-# HeadRush Pedalboard, MX5 & Gigboard — Neural Amp Modeler (NAM) mod
+# NAM mod for HeadRush Pedalboard, MX5 & Gigboard — Neural Amp Modeler (NAM)
 
 Reverse-engineered firmware mod for the HeadRush Pedalboard, MX5, and Gigboard, adding
 [Neural Amp Modeler](https://github.com/sdatkinson/NeuralAmpModelerCore)
 (NAM, MIT-licensed) neural-network amp-model inference as a pedal.
+
+> **Unofficial.** This is an independent community project. It is not
+> affiliated with, endorsed by, or supported by inMusic or HeadRush; "HeadRush",
+> "Pedalboard", "MX5" and "Gigboard" are used only to say which devices it
+> works with, and remain the trademarks of their owners. This repository and its
+> releases contain no HeadRush firmware: the installer downloads the official
+> updater from HeadRush on your machine and patches your own copy there, so that
+> NAM models can run on hardware you own. Flashing modified firmware can brick
+> your device and may void its warranty, and HeadRush's own license terms may
+> not allow modifying its firmware: whether to use it is your decision, at your
+> own risk (see [Disclaimer](#disclaimer)).
 
 **Status**: on the Pedalboard, two real NAM pedals, **NAM** and **NAM TWO**, are
 added to the Distortion list next to the stock pedals; each can be added twice,
@@ -12,8 +23,8 @@ NAM, so existing pedalboards that use it keep working. See below.
 
 ## Install
 
-1. Download `headrush-nam-gui` for your OS from the
-   [GitHub Releases page](https://github.com/lolgab/headrush-nam-mod/releases).
+1. Download `nam-mod-gui` for your OS from the
+   [GitHub Releases page](https://github.com/lolgab/mods-for-legacy-headrush/releases).
    **Windows**: it's a `.zip` — unzip it and keep the `.exe` together with
    the `.dll` files next to it; they're required, not optional.
    **macOS**: one universal binary (Apple Silicon and Intel), nothing
@@ -29,9 +40,10 @@ NAM, so existing pedalboards that use it keep working. See below.
    [this video](https://www.youtube.com/watch?v=6H90kbOCJG8) for a
    walkthrough.
 4. Run the patched updater it just built:
-   - **macOS**: the patched `.app` it wrote — double-click it like the
-     official updater.
-   - **Windows**: the patched `.exe` it wrote — run it like the official
+   - **macOS**: the patched `NAM mod for HeadRush … Firmware Updater.app`
+     it wrote — double-click it like the official updater.
+   - **Windows**: the patched `NAM mod for HeadRush … Firmware Updater.exe`
+     it wrote — run it like the official
      updater (unsigned, so SmartScreen may warn about an unrecognized
      publisher — expected for any unofficial build).
 
@@ -43,7 +55,13 @@ on the first download and checked every time; a file that no longer matches
 (truncated, corrupted, edited) is discarded and downloaded afresh. Delete the
 folder, or set `NAM_NO_CACHE=1`, to force a fresh download.
 
-Keep the unmodified updater the tool leaves alongside the patched one — you
+The installer only patches the exact 2.7 firmware it was tested with: the
+firmware image inside the updater must match a known SHA-256 for your model.
+If HeadRush publishes a different version, or the download is damaged, it
+stops without patching anything.
+
+Keep the unmodified updater the tool leaves alongside the patched one (the
+`… (stock)` copy) — you
 need it to recover if a flash goes wrong (see
 [docs/RECOVERY.md](docs/RECOVERY.md)).
 
@@ -205,7 +223,7 @@ TONE / LEVEL still trim on top. **Low** (the default) leaves the signal as is.
   added to the firmware.
 - [docs/NAM_PEDAL_DISPLAY.md](docs/NAM_PEDAL_DISPLAY.md) — the dB faders and
   the model readout, and what doesn't work.
-- [docs/BUILDING.md](docs/BUILDING.md) — building `headrush-nam-gui` from
+- [docs/BUILDING.md](docs/BUILDING.md) — building `nam-mod-gui` from
   source.
 
 ## Disclaimer
@@ -222,6 +240,10 @@ By using this software, you accept full responsibility for any damage to
 your hardware, including but not limited to a failed flash, data loss, or
 voided manufacturer warranty. Proceed at your own risk.
 
+This project is not affiliated with, endorsed by, or supported by inMusic or
+HeadRush. Don't ask HeadRush support for help with a modded device: flash the
+stock updater back first (see [docs/RECOVERY.md](docs/RECOVERY.md)).
+
 ## License
 
 The patch scripts and glue code in this repo are licensed under the
@@ -233,6 +255,10 @@ license; full texts and per-release-artifact scope are in
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md), which ships inside
 every release download too.
 
-This project reverse-engineers and modifies HeadRush Pedalboard, MX5, and
-Gigboard firmware, which is not affiliated with or endorsed by inMusic/HeadRush.
-Use at your own risk; modifying your device's firmware may void its warranty.
+This project reverse-engineers HeadRush Pedalboard, MX5, and Gigboard firmware
+for interoperability, so that NAM models can run on those devices. The GPLv3
+covers only this project's own code, not HeadRush's firmware, which stays
+under HeadRush's terms and is never distributed here.
+
+Contributions are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) lists what can
+and can't go into the repository.

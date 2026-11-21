@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(headrush_nam_gui C)
+project(nam_mod_gui C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -32,7 +32,6 @@ set(NAM_BLOBS_GENERATED_SOURCES
   ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_ui_reverb.c
-  ${NAM_BLOBS_GENERATED_DIR}/blob_ui_tile.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_ui_nam_fix.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_ui_pedal_art.c
   ${NAM_BLOBS_GENERATED_DIR}/blob_ui_rig_block.c
@@ -103,15 +102,6 @@ add_custom_command(
           ${NAM_BLOBS_GENERATED_DIR}/blob_ui_reverb.c g_ui_reverb_qml
   DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/reverb_ui.qml
   COMMENT "Embedding reverb_ui.qml as a C byte array"
-  VERBATIM
-)
-
-add_custom_command(
-  OUTPUT ${NAM_BLOBS_GENERATED_DIR}/blob_ui_tile.c
-  COMMAND $<TARGET_FILE:bin2c> ${CMAKE_SOURCE_DIR}/patch/ui/EncoderParamInfo.qml
-          ${NAM_BLOBS_GENERATED_DIR}/blob_ui_tile.c g_ui_tile_qml
-  DEPENDS bin2c ${CMAKE_SOURCE_DIR}/patch/ui/EncoderParamInfo.qml
-  COMMENT "Embedding EncoderParamInfo.qml as a C byte array"
   VERBATIM
 )
 
@@ -363,26 +353,26 @@ if(SDL2_INCLUDE_DIRS AND SDL2_LIBRARIES)
     # Windows host in this repo) -- see app/main.c's own top comment.
     list(APPEND GUI_APP_SOURCES app/win_repack.c)
   endif()
-  add_executable(headrush-nam-gui ${GUI_APP_SOURCES})
-  target_include_directories(headrush-nam-gui PRIVATE ${SDL2_INCLUDE_DIRS} third_party/nuklear)
-  target_link_libraries(headrush-nam-gui PRIVATE nam_gui_core ${SDL2_LIBRARIES})
-  add_dependencies(headrush-nam-gui nam_gui_blobs)
+  add_executable(nam-mod-gui ${GUI_APP_SOURCES})
+  target_include_directories(nam-mod-gui PRIVATE ${SDL2_INCLUDE_DIRS} third_party/nuklear)
+  target_link_libraries(nam-mod-gui PRIVATE nam_gui_core ${SDL2_LIBRARIES})
+  add_dependencies(nam-mod-gui nam_gui_blobs)
   # Nuklear (NK_IMPLEMENTATION, in app/main.c) calls libm functions
   # (acos/sin/sqrt/...) directly -- on macOS those are folded into
   # libSystem so this is a no-op there, but a separate libm.so is required
   # on Linux or linking fails with "undefined reference to acos@@GLIBC_*".
   find_library(MATH_LIBRARY m)
   if(MATH_LIBRARY)
-    target_link_libraries(headrush-nam-gui PRIVATE ${MATH_LIBRARY})
+    target_link_libraries(nam-mod-gui PRIVATE ${MATH_LIBRARY})
   endif()
   if(APPLE)
-    target_link_libraries(headrush-nam-gui PRIVATE "-framework Cocoa")
+    target_link_libraries(nam-mod-gui PRIVATE "-framework Cocoa")
   endif()
   if(WIN32)
     # ShellExecuteA (app/main.c's nam_open_path) needs shell32.
-    target_link_libraries(headrush-nam-gui PRIVATE shell32)
+    target_link_libraries(nam-mod-gui PRIVATE shell32)
   endif()
 else()
-  message(WARNING "SDL2 not found -- skipping headrush-nam-gui target (gui-core-cli still builds). "
+  message(WARNING "SDL2 not found -- skipping nam-mod-gui target (gui-core-cli still builds). "
                    "macOS: brew install sdl2; Debian/Ubuntu: apt install libsdl2-dev.")
 endif()

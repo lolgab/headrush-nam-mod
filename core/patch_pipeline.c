@@ -290,8 +290,7 @@ bool nam_patch_pipeline(const uint8_t* stock_img_data, size_t stock_img_len, con
     {
       if (!nam_qml_override_blockdetails(evil_data, evil_len, "file:///usr/Evil/Resources/pedal_ui.qml", err, err_size))
         goto cleanup;
-      if (!nam_qml_override_encoder_tile(evil_data, evil_len, (const char*)g_ui_tile_qml, (size_t)g_ui_tile_qml_len, err,
-                                         err_size))
+      if (!nam_qml_override_encoder_tile(evil_data, evil_len, err, err_size))
         goto cleanup;
       if (!nam_qml_override_encoder_field(evil_data, evil_len, err, err_size)
           || !nam_qml_override_stomp(evil_data, evil_len, err, err_size))

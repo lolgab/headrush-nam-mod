@@ -3,7 +3,7 @@
 Plain C (C11) implementation of the NAM-mod patch pipeline, with no external
 CLI dependencies (`debugfs`, `e2fsck`, `xz`, `mkimage`, `python3`, ARM
 cross-toolchain, `unzip`/`ditto`, `curl`). Ships a GUI app
-(`headrush-nam-gui`, Nuklear/SDL2) that downloads the stock firmware,
+(`nam-mod-gui`, Nuklear/SDL2) that downloads the stock firmware,
 applies the mod, and writes a ready-to-run result -- no terminal needed:
 
 - **macOS**: a patched, ad-hoc-codesigned copy of the whole `.app` bundle.
@@ -93,7 +93,7 @@ Requires `e2fsprogs` (libext2fs), `xz` (liblzma), `curl` (libcurl), and
 and writes `build/deps-macos-<arch>/deps.cmake`; pass it as
 `cmake -C build/deps-macos-<arch>/deps.cmake -S . -B build`, which is how
 CI builds the self-contained release binary. If SDL2 isn't found, the
-`headrush-nam-gui` target is skipped with a warning and `gui-core-cli`
+`nam-mod-gui` target is skipped with a warning and `gui-core-cli`
 still builds. Also requires **Docker running** the first time (or
 whenever `patch/*.cpp`/`nam_core` changes) to (re)build `blobs/*` -- see
 the `blobs/` entry above.
@@ -128,7 +128,7 @@ bypasses it. The CLI takes the stock `Update.img` directly and does not use it.
 GUI -- can be run from anywhere, not just the repo root:
 
 ```sh
-build/headrush-nam-gui
+build/nam-mod-gui
 ```
 
 Both binaries are fully self-contained: `blobs/*` (compiled once by
@@ -222,7 +222,7 @@ for the same input:
 `scripts/build_blobs.sh` run for real against Docker (not just inspected):
 produces a valid ARM32 EABI5 stripped shared object and a 32-byte
 trampoline, wired into CMake via `add_custom_command`/`add_dependencies` on
-both `gui-core-cli` and `headrush-nam-gui`. Verified all three states of
+both `gui-core-cli` and `nam-mod-gui`. Verified all three states of
 the dependency graph: a clean build (no blobs present) triggers the Docker
 rebuild; a no-op rebuild (nothing changed) does `Built target` for
 everything with no Docker invocation at all; and touching
@@ -233,7 +233,7 @@ Bootlin toolchain directly, no Docker needed since the CI runner is
 already Linux) runs `build_blobs_native.sh` directly on `ubuntu-latest`.
 
 `build-linux`, `build-macos` (universal arm64+x86_64 via Rosetta 2), and
-`build-windows` (MSYS2 MINGW64) all build `headrush-nam-gui` for real on
+`build-windows` (MSYS2 MINGW64) all build `nam-mod-gui` for real on
 their respective GitHub-hosted runners, and `release` uploads all three
 binaries plus a raw `Update_nam.img`-only Linux build as GitHub Release
 assets on `v*` tags.
@@ -274,8 +274,8 @@ way `blobs/*` already works.
 "Depends only on the mingw-w64 runtime" is not the same as "runs standalone"
 -- `libcurl-4.dll`, `liblzma-5.dll`, `SDL2.dll`, and `libwinpthread-1.dll`
 are real DLLs a stock Windows install doesn't have (reported as four
-"missing DLL" popups on launch, [issue #7](https://github.com/lolgab/headrush-nam-mod/issues/7)).
+"missing DLL" popups on launch, [issue #7](https://github.com/lolgab/mods-for-legacy-headrush/issues/7)).
 The CI job now runs `ldd` on the built `.exe`, copies whatever it resolves
-under `/mingw64/` next to it, and ships a `headrush-nam-gui-windows.zip`
+under `/mingw64/` next to it, and ships a `nam-mod-gui-windows.zip`
 (exe + DLLs) instead of a bare `.exe` -- the DLLs must stay in the same
 folder as the `.exe` when run.

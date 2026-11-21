@@ -3,8 +3,9 @@
  *
  * A cache entry is two files in a per-user cache directory: "<key>.zip" and "<key>.sha256" (the SHA-256 of the zip and
  * the URL it came from). It is only reused if the zip hashes to the recorded value again and the URL is unchanged, so
- * a truncated, corrupted or edited file is never used: it is deleted and downloaded afresh. The hash is recorded on
- * first download (trust on first use); there is no list of known-good official hashes to check against.
+ * a truncated, corrupted or edited file is never used: it is deleted and downloaded afresh. The zip's hash is recorded on
+ * first download (trust on first use); the Update.img inside it is then checked against the known official image
+ * (ModelTarget.stock_img_sha256), so an unexpected firmware is refused.
  *
  * Directory: macOS ~/Library/Caches/headrush-nam-mod, Windows %LOCALAPPDATA%\headrush-nam-mod\cache, otherwise
  * $XDG_CACHE_HOME or ~/.cache/headrush-nam-mod. Set NAM_NO_CACHE=1 to bypass the cache entirely. */

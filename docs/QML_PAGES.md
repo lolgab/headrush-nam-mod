@@ -8,8 +8,7 @@ mismatch. Everything here was verified on hardware.
 
 `Evil` keeps every QML file twice: the source in its Qt resources and a `qmlcachegen` unit that wins at load time.
 Editing only the source changes nothing. The units are found through a hash keyed by static UTF-16 `QString`s
-(`"/Pages/BlockDetails.qml"`, 535 of them; the registry constructor around code `0x5d0f48` inserts `(&QStringData,
-&unit)` pairs). **Changing the last character of a key** (`.qml` to `.qmx`) makes that lookup miss and Qt compiles the
+(`"/Pages/BlockDetails.qml"`, 535 of them). **Changing the last character of a key** (`.qml` to `.qmx`) makes that lookup miss and Qt compiles the
 embedded source instead. Not enough: `QML_DISABLE_DISK_CACHE`, or corrupting the units' version field (compiled-in
 units are not header-checked).
 
@@ -44,7 +43,7 @@ screens the stock text can still lag.
 | File (unit key) | Edit |
 |---|---|
 | `Pages/BlockDetails.qml` | the editor Loader (above), and the fallback picture (`Other.png`) becomes a Loader of `pedal_art.qml` |
-| `Groups/EncoderParamInfo.qml` | the tiles' captions use the real names (a plain, uncompressed entry: replaced whole by `patch/ui/EncoderParamInfo.qml`, which has to fit the stock source's 2426 bytes) and, for NAM pedals, a Loader of `nam_fix.qml` |
+| `Groups/EncoderParamInfo.qml` | the tiles' captions use the real names (a plain, uncompressed entry: `nam_qml_override_encoder_tile` edits the stock source in place at install time, adding helpers and the renaming, then squeezes out blanks so the result fits the stock 2426 bytes; the repo carries only the edits, not the stock file) and, for NAM pedals, a Loader of `nam_fix.qml` |
 | `Pages/EncoderField.qml` | the tile count drops by the switches the pages replace (NAM: Hi-Cut, Reverb: Gain and Hi-Cut) |
 | `Groups/SignalChainModuleStomps/ActiveStomp.qml` | the Reverb's stock stomp picture is recoloured blue (`Colorize` hue) and a Loader of `rig_block.qml` goes in right after the stock LED picture |
 

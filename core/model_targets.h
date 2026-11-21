@@ -11,6 +11,8 @@
 #ifndef NAM_GUI_MODEL_TARGETS_H
 #define NAM_GUI_MODEL_TARGETS_H
 
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define NAM_MAX_QML_RENAMES 4
@@ -42,6 +44,10 @@ typedef struct
 
   int qml_rename_count; /* 0 = no QML relabel for this model */
   QmlRename qml_renames[NAM_MAX_QML_RENAMES];
+
+  /* SHA-256 (lowercase hex) of the stock Update.img this target was built and tested against: the one inside the
+   * official 2.7 updater, macOS and Windows alike. The GUI patches nothing else. */
+  const char* stock_img_sha256;
 } ModelTarget;
 
 #define NAM_MODEL_COUNT 3
@@ -55,5 +61,8 @@ extern const ModelTarget NAM_MODEL_TARGETS[NAM_MODEL_COUNT];
  * was chosen; on failure (NULL return), why, for use in the error message.
  * Mirrors select_target()'s (target, reason) return in model_targets.py. */
 const ModelTarget* nam_select_target(const char* model_name, const char* compatible, const char** reason_out);
+
+/* True if `data` is the stock Update.img `target` was tested against; out_hex (if non-NULL) gets its SHA-256. */
+bool nam_is_known_stock_img(const ModelTarget* target, const uint8_t* data, size_t len, char out_hex[65]);
 
 #endif

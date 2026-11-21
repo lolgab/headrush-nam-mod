@@ -131,7 +131,7 @@ bool nam_http_download(const char* url, NamDownloadProgressFn progress, void* pr
   curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
   curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo_cb);
   curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &pctx);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "headrush-nam-mod-gui/1.0");
+  curl_easy_setopt(curl, CURLOPT_USERAGENT, "nam-mod-gui/1.0");
   curl_easy_setopt(curl, CURLOPT_FAILONERROR, 1L);
 #ifdef _WIN32
   const char* ca_bundle = win_ca_bundle_path();

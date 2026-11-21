@@ -18,11 +18,11 @@
  * found exactly once. */
 bool nam_qml_override_blockdetails(uint8_t* data, size_t data_len, const char* page_url, char* err, size_t err_size);
 
-/* Replaces the stock Groups/EncoderParamInfo.qml (the DRIVE / LEVEL / TONE tiles of the encoder field) by `qml`, which
- * must fit the stock source's slot (plain, uncompressed entry: padded with spaces) and breaks that file's unit key.
- * Refuses unless the stock entry and key are each found exactly once. */
-bool nam_qml_override_encoder_tile(uint8_t* data, size_t data_len, const char* qml, size_t qml_len, char* err,
-                                   size_t err_size);
+/* Edits the stock Groups/EncoderParamInfo.qml (the DRIVE / LEVEL / TONE tiles of the encoder field) in place so the
+ * additive pedals' tiles show their real parameter names, squeezes the result back into the stock source's slot (plain,
+ * uncompressed entry: padded with spaces) and breaks that file's unit key. Refuses unless the stock entry, every edit
+ * point and the key are found the expected number of times. */
+bool nam_qml_override_encoder_tile(uint8_t* data, size_t data_len, char* err, size_t err_size);
 
 /* The encoder field's tile count is the engine's NumEditParams; for the additive pedals it hides the tiles of the
  * switches the pages replace (NAM: Hi-Cut, Reverb: Gain and Hi-Cut). Same refusal rules as above. */
